@@ -1,0 +1,1869 @@
+---
+title: "Lettuce Demand Forecasting in Berkeley, CA and New York, NY"
+author:
+  - name: "Jaume Clave Domenech"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is the R Notebook that will be utilised for the analysis, extrapolation and forecasting of lettuce demand for a fast food resturant in various locations. 
+
+This report contains various sections:
+
+  1. Data Importing
+  2. Data Pre-Processing
+  3. Lettuce Demand Forecasting
+      a. Resturant 4904
+      b. Resturant 12631
+      c. Resturant 46673
+      d. Resturant 20974
+  4. Conclusion
+      
+The dataset used is provided by one of the largest fast-food restaurant chains in the US. It includes (1) transaction information such as menu items that were purchased and quantities of each item; (2) ingredient lists for individual menu items; (3) metadata on restaurants, including location, and store type. The data observation window is from early March, 2015 to 06/15/2015 and includes transactional data from 2 stores in Berkeley, CA and 2 stores in New York, NY.
+
+The report aims to to forecast the daily demand of lettuce for the next two weeks (from 06/16/2015 to 06/29/2015) to help the managers make inventory replenishment decisions. This will be done through the use of Holt-Winters, ETS and ARIMA methods. Each will be compared with eachother to find an optimal forecasting method for a specific store.
+
+```{r, include = FALSE}
+## Install dplyr for 
+#install.packages('dplyr', repos = 'https://cloud.r-project.org')
+library(dplyr)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(stargazer)
+library(kableExtra)
+options(warn=-1)
+```
+
+## Data Importing
+This section of code creates a working directory and imports each csv file provided and creates dataframes for each individual file
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Set working directory to csv file folder
+setwd("C:\\Users\\Jaume\\Documents\\ICBS - MSc Business Analytics\\Logistics & Supply Chain\\individual_assignment")
+
+## Import each csv file
+ingredients <- read.csv('ingredients.csv')
+menu_items <- read.csv('menu_items.csv')
+menuitem <- read.csv('menuitem.csv')
+portion_uom_types <- read.csv('portion_uom_types.csv')
+pos_ordersale <- read.csv('pos_ordersale.csv')
+recipe_ingedient_assignments <- read.csv('recipe_ingredient_assignments.csv')
+recipe_sub_recipe_assignments <- read.csv('recipe_sub_recipe_assignments.csv')
+recipes <- read.csv('recipes.csv')
+sub_recipe_ingr_assignments <- read.csv('sub_recipe_ingr_assignments.csv')
+sub_recipes <- read.csv('sub_recipes.csv')
+```
+
+```{r, include = FALSE}
+## View each dataset
+View(ingredients)
+View(menu_items)
+View(menuitem)
+View(portion_uom_types)
+View(pos_ordersale)
+View(recipe_ingedient_assignments)
+View(recipe_sub_recipe_assignments)
+View(recipes)
+View(sub_recipe_ingr_assignments)
+View(sub_recipes)
+```
+
+## Data Pre-Processing
+The goal is to forecast demand for one specific ingredient: lettuce, for each of the four individual restaurants. The data has been provided in 10 different csvs and above each csv has been processed into a dataframe. This section aims at manipulating, processing and joining different dataframes so as to build a dataframe for each of the four resturants that has two columns; a column with the date (daily) and a second column with the amount of lettuce used (daily). The lettuce amount will be in ounces as the US, where these resturants are located, use the imperial system where the ounze measurement is relevant. 
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Merge 
+ingredients_merged <- merge(ingredients, portion_uom_types)
+
+## Return row in ingredietns_merged displaying Lettuce ingredient by its IngredientId and in ounces
+ingredients[ingredients$IngredientId == 27, ]
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Now, the exact quantity of lettuce from each recipe must be calculated
+## For every recipe we will return the RecipeId which should be unique and the corresponding amount of Lettuce used in each one
+total_recipe_lettuce <- recipe_ingedient_assignments[recipe_ingedient_assignments$IngredientId == 27, c(1, 3)]
+
+## For every sub recipe we will return the RecipeId which should be unique and the corresponding amount of Lettuce used in each one
+## This will be done in mulitple steps. Firstly, return rows in sub_recipe_ingr_assignments by its IngredientId and in ounces
+lettuce_sub_recipe <- sub_recipe_ingr_assignments[sub_recipe_ingr_assignments$IngredientId == 27, ]
+
+recipes_with_sub_recipe_lettuce <- inner_join(lettuce_sub_recipe, 
+                                              recipe_sub_recipe_assignments,
+                                              by = "SubRecipeId")
+
+## The amount of of lettuce in each single subrecipe included in a recipe needs to be calculated. This is done buy multiplying the Factor by the Quantity and adding that to a created new row in recipes_with_sub_recipe_lettuce called Lettuce_Amount
+recipes_with_sub_recipe_lettuce$Lettuce_Amount <- recipes_with_sub_recipe_lettuce$Quantity * recipes_with_sub_recipe_lettuce$Factor
+
+## Since one recipe is allowed to have have multiple subrecipes it is important to group the individual SubRecipeId Lettuce_amount into a total Lettuce_Amount which corresponds to an individual RecipeId
+total_sub_recipe_lettuce <- aggregate(cbind(Lettuce_Amount) ~ RecipeId, sum, data = recipes_with_sub_recipe_lettuce)
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Here we will group both the total_sub_recipe_lettuce and total_recipe_lettuce data structures so as to find the total quantity of lettuce per recipe that each needs.
+## This will be done in multiple steps. Firstly, the total_sub_recipe_lettuce columns need to be renamed
+colnames(total_sub_recipe_lettuce) <- c('RecipeId', 'Quantity')
+
+## Rowbinding of both total_sub_recipe_lettuce and total_recipe_lettuce data structures is done to merge them both
+merged_total_lettuce <- rbind(total_recipe_lettuce, total_sub_recipe_lettuce)
+final_total_lettuce_per_recipe <- aggregate(cbind(Quantity) ~ RecipeId, sum, data = merged_total_lettuce)
+
+## We will create a csv file containing the total recipe per lettuce from the final_total_lettuce_per_recipe structure
+write.csv(final_total_lettuce_per_recipe, file = 'total_lettuce_per_recipe.csv')
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## We have now determined the amount of lettuce needed per recipe. The next step is to take into account each item on the menu and ensure that in the future calculations we are only including data that has lettuce
+## Inner joing menuitem on menu_items by Id and MenuItemId. The idea here is to merge both tables and pass finally connect it to final_total_lettuce_per_recipe by the RecipeId column
+menuitem_1 <- inner_join(menuitem,
+                       menu_items,
+                       by = c('Id' = 'MenuItemId'))
+menuitem_2 <- inner_join(menuitem_1,
+                       final_total_lettuce_per_recipe,
+                       by = 'RecipeId')
+
+## Rename the last column (column 20) on menuitems_2 to be more understandable. The column will be renamed from Quantity.y to Lettuce_Quantity 
+colnames(menuitem_2)[20] <- 'Lettuce_Quantity'
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The menuitem_2 dataframe contains transaction information from March 5th, 2015 to June 15th, 2015. Each transaction now has a value for how much lettuce (in ounces) was involved. There is also a quantity value on each transaction that will need to be multiplied by the lettuce quantity
+menuitem_2$Total_Lettuce_Quantity <- menuitem_2$Quantity.x * menuitem_2$Lettuce_Quantity
+```
+
+The process above has created a dataframe called 'menuitem_2' which has various features. Amongst the features their are the two desired features described in the introduction of this section. The total quantity of lettuce per day in each individual restuarant can now be calculated by aggregating on relevant columns and StoreNumbers.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The total quantity of lettuce per day in each individual restuarant can now be calculated by referencing the resturant store numbers 
+store_4904 <- aggregate(cbind(Total_Lettuce_Quantity) ~ date, sum, data = menuitem_2[menuitem_2$StoreNumber == 4904, c(15, 21)])
+store_12631 <- aggregate(cbind(Total_Lettuce_Quantity) ~ date, sum, data = menuitem_2[menuitem_2$StoreNumber == 12631, c(15,21)])
+store_20974 <- aggregate(cbind(Total_Lettuce_Quantity) ~ date, sum, data = menuitem_2[menuitem_2$StoreNumber == 20974, c(15,21)])
+store_46673 <- aggregate(cbind(Total_Lettuce_Quantity) ~ date, sum, data = menuitem_2[menuitem_2$StoreNumber == 46673, c(15,21)])
+
+kable(list(head(store_4904, 10), head(store_12631, 10), head(store_20974, 10), head(store_46673, 10)),"html", caption = 'First 10 Days of Data for Store 4904, 12631, 20974 and 46673') %>%
+  kable_styling()
+```
+
+
+## Lettuce Demand Forecasting
+Now that each dataframe has been created, the process of identifying a timeseries trends, visualising key timeseries features, identifying good forecasting methods, optimizing the forecasting methods and finally forecasting out-of-sample lettuce demand for 14 days can begin.
+
+This section will take a look at the entire process mentioned above. A detailed analysis will be written out for the forecast process beloning to StoreNumber 4904. The other forecasts for the three following stores, 12631, 44673 and 20974, have been completed in the same way as the forecast for StoreNumber 4904 but won't have such a detailed description. The code for stores 12631, 44673 and 20974 is commented and should faciliate the reader through the process. 
+
+
+## Resturant 4904: Berkeley, California
+The dataframe created for StoreNumber 4904 has two columns, a date column and a lettuce quantity column. This type of dataframe can be converted into a time series object in R using the ts() function. A timeseries is a series of data points ordered in time. In a time series, time is often the independent variable and the goal is usually to make a forecast for the future, exactly what we are trying to do here. The ts() function converts a numeric vector into a R time series object. 
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The daily quantity of lettuce used by each of the four stores, 2 in Berkley and 2 in New York, has been determined. Using this historic data the next step is to forecast the daily amounf of lettuce needed 
+## Focusing on the first StoreNumber (4904) we must create the timeseries that will be used for the forecasting
+ts_store_4904 <- ts(store_4904[, 2], frequency = 7, start = c(03, 13))
+autoplot(ts_store_4904, main="Lettuce Demand in Store 4904 ", xlab="Time Horizon",
+         ylab="Lettuce Quantity (ounces)", col = "darkblue", frame.plot = FALSE)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### STL Decomposition and Visualisation
+The best way to see if there are any seasonal, cyclical or trends in the time series the data must be visualised. This is completed using STL decomposition. STL is a versatile and robust method for decomposing time series. STL is an acronym for “Seasonal and Trend decomposition using Loess”, while Loess is a method for estimating nonlinear relationships. 
+
+The bar on the seasonal pattern is larger than the grey bar on the data panel. This indicates that the seasonal signal is large relative to the variation in the data. The trend panel is the largest box compared to the data and seasonal boxes, this indicates that the variation attributed to the trend is much smaller than the seasonal components and is consequently only a small part of the variation in the data series. The variation attributed to the trend is considerably smaller than the stochastic component (the remainders). As such, we can deduce that these data do not exhibit a trend.
+
+The ggsubseriesplot creates mini time plots for each season. Here, the mean for each season is shown as a blue horizontal line. This stores lettuce demand seems to be highest on Sunday, and throughout the beginning of the week, dropping demand for lettuce significantly on Friday and Saturday. 
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Viusalising the data, with its seasonal, trend and remainder component. 
+plot(stl(ts_store_4904, s.window = "period"), main="Seasonal Decomposition of Time Series Store 4904") ## 
+
+## Various other ggplot2 package plots are used to gain understanding of the data
+ggsubseriesplot(ts_store_4904, main = 'Time Series Sub-Series Plot',
+                ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+ggAcf(ts_store_4904, main = 'Autocorrelation Function (ACF) on Time Series') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Initial Holt-Winters and ETS Functions 
+The Holt-Winters functions is the first forecasting tool that will be used to evaluate the data at hand. It is quite powerful and it can handle complicated seasonal patterns by finding the central value, and the adding in the effects of slope and seasonality. The model is able to predict the future value by computing the combined effect of the preceeding influences. The model requires several parameters: one for each smoothing (ɑ, β, γ), the length of a season, and the number of periods in a season.
+
+A Holt-Winters function with default parameters, other than beta = FALSE, which forces the function to use exponential smoothing on the time series. The exponential smoothing forecasts a prediction in such a way that it is a weighted sum of past observations. The model explicitly uses an exponentially decreasing weight for past observations.
+
+An ETS model is also created in order to be able to compare and contrast the Holt-Winters against another model. This is done so as to have more results and come up with a model that is better able to forecast the demand of lettuce. ETS reffers to the Error, Trend and Seasonal components of a time series, these form exponential smoothing methods. Each term can be combined either additively, multiplicatively, or be left out of the model through the "N" = none, "A" = additive, "M" = multiplicative and "Z" = automatically parameters of the model.
+
+Initially, a "ZZZ" model is created in order to have R automatically fit the Error, Trend and Seasonality values of the time series. This initial model will return letters which will be used throughout the remaineder of the sotre numbher 4904 forecast process.
+
+The Holt-Winters model, the fitted ETS model and the actual time series are plotted for visual interpretability.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Initial Holt-Winters with exponential smoothing
+HW_store_4904 <- HoltWinters(ts_store_4904, beta = FALSE)
+
+## Initial ETS model with automatic fitting for the E, T, S
+ets_store_4904 <- ets(ts_store_4904, model = 'ZZZ')
+ets_store_4904 ## Automatic model concludes a A,N,A model is best for this data
+
+plot(HW_store_4904, main="Holt-Winters - ETS (A,N,A) in-sample performance", 
+     xlab="Time Horizon", ylab="Lettuce Demand (Ounces)", lty = 1, col = "black", frame.plot = FALSE)
+lines(fitted(ets_store_4904), col = "blue", lty = 2)
+legend("bottom", legend=c("Actual","HW", "ETS"), col=c("black", "red", "blue"), box.lty=0, lty=c(1,1,2), cex=0.8)
+```
+
+The results of the inital Holt-Winters is a exponential smooithing without trend and with additive seasonal component. The smoothing constraints outputed by the model are ɑ = 0.136, β = 0 and γ = 0.222. The Alpha value determines the weighting of past data values in setting the baseline (magnitude) for the forecast, with higher values of Alpha leading to the increased weight being given to the most recent observations, while lower values of Alpha implying a more uniform weighting. Beta determines the degree to which recent data trends should be valued compared to older trends when making the forecast. Gamma is the seasonal component of the forecast and the higher the value, the more weight is given to the most recent the seasonal component is weighed. 
+
+All parameters have low results concluding that the estimate at the current time interval is based on a uniform weighting of observations and less weight is designated to the most recent observations. 
+
+The ETS model returns an additive error level and seasonal component. For the optimal values of the smoothing parameters it provides a value for Alpha = 0.177 and Gamma = 1e-04. The ETS model also returns inital states values, one for the level and various for the start values of seasonal components. The smoothing parameters and returned intial states will be utilised to initate a future Holt-Winters model.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Second Holt-Winters with improved parameters using the ets model above. Alpha, Gamma, and Initial States determined 
+HW2_store_4904 <- HoltWinters(ts_store_4904, beta = FALSE, optim.start = c(alpha = 0.1774, gamma = 0.0), l.start = 326.75, s.start = c(6.77, 45.73, 57.19, 34.77, 34.49, -89.14, -89.83))
+HW2_store_4904
+
+##  RMSE for the first and second Holt-Winters model
+sqrt(HW_store_4904$SSE/(length(ts_store_4904)-2))
+sqrt(HW2_store_4904$SSE / (length(ts_store_4904)-2))
+## Sum of square erros / by number of observation-2 (we used first two for initilisation)
+
+## Accuracy
+accuracy_ets_store_4904_k <- data.frame(accuracy(ets_store_4904))
+accuracy_ets_store_4904_k %>%  kable(caption = "Training Set Accuracy of ETS", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+The second Holt-Winters model is created with the initial states and smoothing parameters from the ETS model. This is done to again, increase the number of models tested, in order to fit the data better and come up with a closer optimal final model.
+
+These models are compares using the root-mean-square error. The lower the RMSE, the better and the lowest RMSE will be selected as the model moving forward. The first Holt-Winters has an RMSE of 45.879 and the second Holt-Winters, with initial starts, does worse with and RMSE of 57.278. The best model is the ETS one, achieving an RMSE called through the accuracy() function of 42.191.
+
+Both the ETS model and the first Holt-Winters model will be used on the training data. The accuracy test will be repeated and a final model selected.
+
+### Training and Test set
+When building out forecasts it is essential to utilise a training set, a subset to train the model and a test set, a subset to test the model. The test set must meet two conditions: it must belarge enough to yield statistically meaningful results and it must be representative of the data set as a whole. The reason this is done is to avoid look-ahead bias. Look-ahead bias is a type of bias that occurs a forecast relies on data or information that was not yet available or known during the time period being studied and would lead to inaccurate results for generalizing the lettuce demand. 
+
+The test set needs to be the most recent part of the data as the idea is to simulate a production environment, where after the model is trained it would be evaluated on data it had not seen. Throughout this forecasting project an 80:20 split is used. That is, 80% of the time series data will be attributed to the training set and the most recent 20% will be used for the test set.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Training and test sets
+## When building out your forecast it is important to take your data set and divide it into training and test sets. To avoid biased evaluations we must ensure that training sets contains observations that occurred prior to the ones in validation sets.
+## I will use the standard practise 80:20 split, that is, 80% of the dataset will be used for training and the remainding 20% will be used to evaluate the model, a test set
+
+## Size of training set is 80% of time series (76 days)
+training_ts_store_4904 <- ts(store_4904[1:(nrow(store_4904) * 0.8), 2], frequency = 7)
+length(training_ts_store_4904)
+
+## Size of test set is 20% of time series (19 days)
+test_ts_store_4904 <- store_4904[((nrow(store_4904) * 0.8) + 1) : nrow(store_4904), 2]
+length(test_ts_store_4904)
+
+length(test_ts_store_4904) + length(training_ts_store_4904) ## Length of training set and test set combined
+length(ts_store_4904) ## Length of time series 
+```
+
+### Creating, Forecasting and Visualizing Holt-Winters on Training Set
+The initial Holt-Winters model will now be trained on in-sample data and it will forecast 19 days past the last day of the training data. This is done using the forecast()function which takes the model and a argument, h, the number of periods it should forecast. 
+
+The data is visualised using autoplot(), a ggplot function. The fitted model is shown in red and the forecast is represented in blue. The alpha argument on the forecast() function specifies the prediction level. It is set by default to alpha = 0.05, which is a 95% prediction interval and will be used throughout this project. This is a sensible and widely used prediction interval. An alpha of 0.05 means that the Holt-Winters model will estimate the upper and lower values around the forecast where there is a only a 5% chance that the real value will not be in that range. Put another way, the 95% prediction interval suggests that there is a high likelihood that the real observation will be within the range. This interval is shown in the light blue shaded regions. An 85% confidence interval is the darker blue shaded region. While the darkest blue solid line is the mean value of the forecasted data points.  
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Creating Holt-Winters filtering of the training time series for store 4904. Beta is set to false to force exponential smoothing 
+training_HW_store_4904 <- HoltWinters(training_ts_store_4904, beta = FALSE)
+forecast_HW1_store_4904 <- forecast(training_HW_store_4904, h = 19)
+
+autoplot(forecast_HW1_store_4904, main = 'Training Set Holt-Winters Forecast', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_HW1_store_4904), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 16, by = 2)) +
+  scale_y_continuous(breaks = c(150, 200, 250, 300, 350, 400, 450)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Creating, Forecasting and Visualizing ETS(ANA) on Training Set
+The initial ETS model with a model paramet = 'ANA', a	 model	 with	 an	additive	level	and	seasonal component, will now be trained on in-sample data and it will forecast 19 days past the last day of the training data. This is done using the forecast()function which takes the model and a argument, h, the number of periods it should forecast. 
+
+The data is visualised using autoplot(), a ggplot function. The fitted model is shown in red and the forecast is represented in blue. The alpha argument on the forecast() function specifies the prediction level. It is set by default to alpha = 0.05, which is a 95% prediction interval and will be used throughout this project. This is a sensible and widely used prediction interval. An alpha of 0.05 means that the Holt-Winters model will estimate the upper and lower values around the forecast where there is a only a 5% chance that the real value will not be in that range. Put another way, the 95% prediction interval suggests that there is a high likelihood that the real observation will be within the range. This interval is shown in the light blue shaded regions. An 85% confidence interval is the darker blue shaded region. While the darkest blue solid line is the mean value of the forecasted data points.  
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## ETS models use maximum likelihood, the probability of the data arising from the specified model. ETS automatically chooses the best type of model. Convenient for forecasting timeseries that have trends or seasonality. Lets explore...
+training_ets_store_4904 <- ets(training_ts_store_4904, model = 'ANA')
+forecast_ets_store_4904 <- forecast(training_ets_store_4904, h = 19)
+
+autoplot(forecast_ets_store_4904, main = 'Training Set ETS(A,N,A) Forecast',
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_ets_store_4904), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 16, by = 2))+
+  scale_y_continuous(breaks = c(150, 200, 250, 300, 350, 400, 450)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Out-Of-Sample Model Comparison
+Using the accuracy() function with an argument "f", for forecast, that holds an object with class "forecast" and a second argument "x" containing actual values of the same length as object, both models are evaluated individually. 
+
+The performance metric used for evaluation is the RMSE. By looking at the results of each accuracy test, it can be concluded that the ETS(ANA) model (RMSE = 55.959) is superior to the Holt-Winters model (RMSE = 79.378) as it has a lower RMSE on the out-of-sample data. The ETS model not only fits the data better, but it also seems to predict it better. Because the ETS model has both a better in-sample and out-of-sample RMSE score and preformance it is selected as the better model and will be tested again later, during the ARIMA forecast process.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Accuracy Comparison of ETS and Holt-Winter
+accuracy_ets_HW_4904 <- rbind(accuracy(forecast_HW1_store_4904, test_ts_store_4904),
+                              accuracy(forecast_ets_store_4904, test_ts_store_4904))
+
+accuracy_ets_HW_4904_k <- data.frame(accuracy_ets_HW_4904, row.names = c('Train', 'Test', 'Train_2', 'Test_2'))
+
+accuracy_ets_HW_4904_k %>%  kable(caption = "Accuracy of Best ETS and HW", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("Holt-Winters", 1, 2) %>%
+  pack_rows("ETS(A,N,A)", 3, 4) 
+
+```
+
+### Final ETS Model
+The final ETS(ANA) model is trained on the entire time series relating to store number 4904. This is done in order to give the most accurate 14 day lettuce demand forecast for the store. Again, the forecast() function is used, this time with an "h" argument of 14. 
+
+The ETS model and the forecast is presented visually below.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The ETS model is supieror to the Holt-Winter model because ME, RMSE, MAE, MAPE, and MASE are all lower when comparing the models. The ETS model will be trained on all the data and finally used to forecast the 14 day period (06/16/2015 to 06/29/2015)
+final_ets_store_4904 <- forecast(ets_store_4904, h = 14)
+
+final_ets_store_4904_k <- data.frame(final_ets_store_4904, 
+                                     row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15', '22/06/15',
+                                                   '23/06/15', '24/06/15', '25/06/15', '26/06/15', '27/06/15', '28/06/15', '29/06/15'))
+final_ets_store_4904_k %>%  kable(caption = "Final 14 Day ETS Forecast", align = 'c') %>%  kable_styling(full_width = F)
+
+autoplot(final_ets_store_4904, main = 'Final 14 Day ETS (A,N,A) Forecast', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon', xlab = 'Time Horizon') + 
+  autolayer(fitted(final_ets_store_4904), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+```
+
+### Forecast Further Improvements
+The ETS model that has been used and plotted now needs to be examined in more detail in order to determine if further improvements may be made. There are varuious steps and plots that need to be studied in order to come to a conclusion. Firstly, the checkresiduals() function sees if the residuals from the time series model look like white noise. White noise occurs when the variables are independent and identically distributed with a mean of zero. This means that all variables have the same variance σ^2^ and each value has a zero correlation with all other values in the series. The residuals from a time series forecast model should ideally be white noise as this means that all of the signal information in the time series has been harnessed by the model in order to make predictions. All that is left is the random fluctuations that cannot be modeled.
+
+There are various methods to see if the residuals from the forecast model are indeed white nosie. By looking at the residuals plot, shown by the checkresiduals() function and then plotted again for better interpretability, it seems that the forecast errors have a constant variance and a mean of 0. This statement is validated further by examining the histogram. The histogram plot shows the forecast errors with an overlaid normal curve that has a mean of zero and roughly the same distribution as the forecast errors.  
+
+The Ljung-Box	test statistic considers the first "h" autocorrelations values together. A significant test (small p-value) indicates the data are probably not white noise. It is a way to test for the absence of serial autocorrelation and we desire a small p-value in order to conclude our model is sufficiently forecasted. The test is perfomed on lags 1 - 20 and the the null hypothesis is the independence of the time series. The Box.test() results in a test statistic of 26.507 and a p-value of 0.1497. These are large values and the null hypotheisis of indipenditely distributed forecast errors is accepted. 
+
+The autocorrelation plot (ACF)is a visual way to show serial correlation in data that changes over time and will be the final test used to see if the residuals are white noise. The plot goes hand in hand with the Ljung-Box test. Using ggplots, ggACF() function, lags 1 - 19 are visually displayed. Autocorrelation is where an error at one point in time travels to a subsequent point in time. The blue lines are based on the sampling distribution for autocorrelation assuming the data is white noise. Any spike between the blue lines should be ignored as they are not statistically significant. Spikes out of the blue lines might indicate something interesting in the data that could be used to build a forecasting analysis. Obsebserving this ACF plot allows us to see that only one lag (lag = 12) is significant as it touches the blue lines. Out of the first 20 lags, one is expected to exceed the 95% confidence interval marked by the blue lines, and one lag does just that and this is attributed to randomness.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Ljung-Box Test
+Box.test(final_ets_store_4904$residuals, lag = 20, type = 'Ljung-Box')
+
+## These plots are descriptive but they can be improved to increase interpretability by plotting and optimising each one individually
+## Lets focus on the residuals plot in order to determine if they have constant variance (desired)
+autoplot(final_ets_store_4904$residuals, main = 'Forecast Errors ETS (A,N,A)', ylab = 'ETS (A,N,A) Residuals', col = 'steelblue') + 
+  scale_x_continuous(breaks = seq(5, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+## Next lets look at the ACF plot
+ggAcf(final_ets_store_4904$residuals, main = 'Autocorrelation Function (ACF) on ETS (A,N,A) Residuals') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 22, by = 2))
+
+## Histogram of residuals
+h <- hist(final_ets_store_4904$residuals, breaks = 20, col = '#a1d99b', main = 'Distribution of Forecast Errors on ETS(ANA)', ylab = 'Residuals')
+xfit<-seq(min(final_ets_store_4904$residuals),max(final_ets_store_4904$residuals),length=40)
+yfit<-dnorm(xfit,mean=mean(final_ets_store_4904$residuals),sd=sd(final_ets_store_4904$residuals))
+yfit <- yfit*diff(h$mids[1:2])*length(final_ets_store_4904$residuals)
+lines(xfit, yfit, col="#31a354", lwd=2)
+```
+
+The four tests above help conclude that the ETS(ANA) model is an suficient predictive model with no possible further improvments when trying to predict the lettuce demand for store number 4904.
+
+### ARIMA Forecast Models
+The next step in the project is to develop and ARIMA model that is able to forecast lettuce demand. The ARIMA model will then be compared with the final ETS model above to determine what the truest and most accurate forecast model is. ARIMA stands for AutoRegressive Integrated Moving Average. It is a class of model that captures a suite of different standard temporal structures in time series data. The "AR" represents autoregression: a model that uses the dependent relationship between an observation and some number of lagged observations. The "I" is the integrated part: the use of differencing of raw observations (e.g. subtracting an observation from an observation at the previous time step) in order to make the time series stationary. The "MA" is the moving average: a model that uses the dependency between an observation and a residual error from a moving average model applied to lagged observations.
+
+Each part listed above is a parameter in the ARIMA model and these parameters need to be estimated and determined. Test such as the ADF,  augmented Dickey–Fuller, test tests the null hypothesis that a unit root is present in a time series sample. The KPSS, or  Kwiatkowski–Phillips–Schmidt–Shin, tests are used for testing a null hypothesis that an observable time series is stationary around a deterministic trend against the alternative of a unit root. The Phillips–Perron (PP) Test is a modification of the Dickey Fuller test, and corrects for autocorrelation and heteroscedasticity in the errors. A unit root isa stochastic trend in a time series, sometimes called a “random walk with drift”; If a time series has a unit root, it shows a systematic pattern that is unpredictable. The tests listed above help determine if the unit root is present.
+
+The ndiffs() function estimate the number of differences required to make a given time series stationary. It uses a unit root test to determine the number of differences required for time series x to be made stationary. The nsdiffs() function estimates the number of differences required to make a given time series stationary. It uses a seasonal unit root tests to determine the number of seasonal differences required for time series x to be made stationary.
+
+The outlined tests are completed below in order to determine any trends that might or might not have to be taken into account in the ARIMA model.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Arima Model
+## Testing if timeseries of store is stationary
+adf.test(ts_store_4904) ## Augmented Dickey–Fuller (ADF) t-statistic test to find if the series has a unit root (a series with a trend line will have a unit root and result in a large p-value)
+kpss.test(ts_store_4904, null = 'Trend') ## Kwiatkowski-Phillips-Schmidt-Shin (KPSS) tests he null hypothesis of trend stationarity (a low p-value will indicate a signal that is not trend stationary, has a unit root) 
+pp.test(ts_store_4904)
+ndiffs(ts_store_4904)
+nsdiffs(ts_store_4904)
+```
+
+Because its level and variance look constant over the time horizon, the time series looks to be a trend stationary in its mean and variance. It has also been determined that the time series has a seasonal component. This information will be utilised and the first order differnece will be computed in order to make the time series stationary in both the trend and seasonal components. This last bit of information is determined using the nsdiff() function which outputs a 1 when there is a seasonal unit root.
+
+The differntiated time series for store 4904 is plotted below. The AFC and PACF will be analysed to gain further insight into how to construct the ARIMA model. The time series is differntiated because a time series with a constant mean, variance, and autocorrelation, i.e. a stationary one, is much easier to work with - since future values of the series become more predictable. The first difference, which is what is executed below, the function is returing the difference between a value and the one for the time period immediately previous to it.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Differencing is a way of making a time series stationary; this means that you remove any systematic patterns such as trend and seasonality from the data
+diff_ts_store_4904 <- diff(ts_store_4904, lag = frequency(ts_store_4904), differences = 1)
+autoplot(diff_ts_store_4904, main = 'Differentiated Time Series', ylab = 'Residuals', xlab = 'Time Horizon') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Differentiating 
+Looking at the ACF plot, the autocorrelation seems to disapeer continously. Especially after lag 8 where it seems to vanish. A relative order of the non-seasonal MA component could be q ≤ 6. It is interesting to note that the ACF seems to decay in a sinosodial method leading to a possible non-seasonal AR component (p ≤ 2).
+
+The PACF, on the contrary, does not seem to disapeer exponentially, a seasonal AR part can be ignored (P = 0). The order of the seasonal MA component can be selected to be Q = 1 because of the three spikes at the start of the PACF plot that pass the significane lines. 
+
+Various ARIMA models with different structures will be examined below in order to determine the optimal one for forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+acf(diff_ts_store_4904, lag.max = 100, main = "Autocorrelation Function of Seasonal Differenced Time Series", frame.plot = FALSE) 
+pacf(diff_ts_store_4904, lag.max = 100, main = " Partial Autocorrelation Function of Seasonal Differenced Time Series", frame.plot = FALSE)
+
+## Initial auto.arima model that finds 'best model' 
+auto.arima(ts_store_4904, trace = TRUE, ic = 'bic', approximation = FALSE) 
+```
+
+### Manual ARIMA Functions
+The next step is to utilise the information the differentiated ACF and PACF plots have provided along with the best models the auto.arima() function has provided in order to create multiple ARIMA models that will be used to forecast the lettuce demand and compared with each other using the accuracy() function. 
+
+ARIMA modes have 3 parameters "p", "d" and "q". The "p" parameter is the number of lag observations included in the model, also called the lag order. The "d" parameter is the number of times that the raw observations are differenced, also called the degree of differencing. The "q" parameter is the size of the moving average window, also called the order of moving average. These are represented as such: ARIMA(p,d,q). ARIMA models are also capable of modelling a wide range of seasonal data and this is represented with the "P", "D" and "Q" parameters. Which represent exactly the same as their respective lowercase parameters do, except it is for the seasonal component. 
+
+All the tests above, along with the best model of the auto.arima() should be a possible form or variation of ARIMA(p,0,q)(P,1,Q). The section below tests variations of the possible base form.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The best model is determined to be ARIMA(1,0,1)(0,1,1)[7] 
+arima1_store_4904 <- Arima(ts_store_4904, order = c(1, 0 ,0), seasonal = list(order = c(0, 1, 1), period = 7))
+arima2_store_4904 <- Arima(ts_store_4904, order = c(1, 0 ,1), seasonal = list(order = c(0, 1, 1), period = 7))
+arima3_store_4904 <- Arima(ts_store_4904, order = c(1, 0 ,2), seasonal = list(order = c(0, 1, 1), period = 7))
+arima4_store_4904 <- Arima(ts_store_4904, order = c(1, 0 ,3), seasonal = list(order = c(0, 1, 1), period = 7))
+arima5_store_4904 <- Arima(ts_store_4904, order = c(1, 0 ,4), seasonal = list(order = c(0, 1, 1), period = 7))
+arima6_store_4904 <- Arima(ts_store_4904, order = c(1, 0 ,5), seasonal = list(order = c(0, 1, 1), period = 7))
+arima7_store_4904 <- Arima(ts_store_4904, order = c(1, 0 ,6), seasonal = list(order = c(0, 1, 1), period = 7))
+arima8_store_4904 <- Arima(ts_store_4904, order = c(0, 0 ,1), seasonal = list(order = c(0, 1, 1), period = 7))
+arima9_store_4904 <- Arima(ts_store_4904, order = c(0, 0 ,3), seasonal = list(order = c(0, 1, 1), period = 7))
+arima10_store_4904 <- Arima(ts_store_4904, order = c(0, 0 ,5), seasonal = list(order = c(0, 1, 1), period = 7))
+arima11_store_4904 <- Arima(ts_store_4904, order = c(0, 0 ,7), seasonal = list(order = c(0, 1, 1), period = 7))
+```
+
+The forecast function is used on each ARIMA model and used with a 14 number period forecast
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## 14 day ARIMA forecast
+forecast_arima1_store_4904 <- forecast(arima1_store_4904, h = 14)
+forecast_arima2_store_4904 <- forecast(arima2_store_4904, h = 14)
+forecast_arima3_store_4904 <- forecast(arima3_store_4904, h = 14)
+forecast_arima4_store_4904 <- forecast(arima4_store_4904, h = 14)
+forecast_arima5_store_4904 <- forecast(arima5_store_4904, h = 14)
+forecast_arima6_store_4904 <- forecast(arima6_store_4904, h = 14)
+forecast_arima7_store_4904 <- forecast(arima7_store_4904, h = 14)
+forecast_arima8_store_4904 <- forecast(arima8_store_4904, h = 14)
+forecast_arima9_store_4904 <- forecast(arima9_store_4904, h = 14)
+forecast_arima10_store_4904 <- forecast(arima9_store_4904, h = 14)
+forecast_arima11_store_4904 <- forecast(arima9_store_4904, h = 14)
+```
+
+### In-Sample Comparison
+Using the accuracy() function with an argument "f", for forecast, that holds an object with class "forecast" and no second argument, containing evaluates the "forecast" object training set accuracy measures of the forecasts based on f["x"]-fitted(f).
+
+The performance metric used for evaluation is the RMSE. By looking at the results of each one, the lowest RMSE is from ARIMA7 (38.76), while ARIMA6 and ARIMA5 are next two best with RMSE scores of 41.01 and 41.52 respectively. The best three ARIMA models will be improved and visually displayed.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Accuracy stores Training Sets
+accuracy_arima_4904 <- rbind(accuracy(forecast_arima1_store_4904), accuracy(forecast_arima2_store_4904), accuracy(forecast_arima3_store_4904),
+           accuracy(forecast_arima4_store_4904), accuracy(forecast_arima5_store_4904), accuracy(forecast_arima6_store_4904),
+           accuracy(forecast_arima7_store_4904), accuracy(forecast_arima8_store_4904), accuracy(forecast_arima9_store_4904),
+           accuracy(forecast_arima10_store_4904), accuracy(forecast_arima11_store_4904))
+
+accuracy_arima_4904_k <- data.frame(accuracy_arima_4904, 
+                                     row.names = c('ARIMA(1,0,0)(0,1,1)', 'ARIMA(1,0,1)(0,1,1)', 'ARIMA(1,0,2)(0,1,1)',
+                                                   'ARIMA(1,0,3)(0,1,1)', 'ARIMA(1,0,4)(0,1,1)', 'ARIMA(1,0,5)(0,1,1)',
+                                                   'ARIMA(1,0,6)(0,1,1)', 'ARIMA(0,0,1)(0,1,1)', 'ARIMA(0,0,3)(0,1,1)',
+                                                   'ARIMA(0,0,5)(0,1,1)','ARIMA(0,0,7)(0,1,1)'))
+
+accuracy_arima_4904_k %>%  kable(caption = "Accuracy of ARIMA Model", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Autoplot of store 4904 timeseries and the best three ARIMA forecasts
+autoplot(ts_store_4904, main = 'ARIMA In-Sample Performance', ylab = 'Lettuce Quantity (in Ounces)', 
+         xlab = 'Time Horizon') +
+  autolayer(fitted(forecast_arima5_store_4904), series = 'ARIMA5', na.rm=TRUE) +
+  autolayer(fitted(forecast_arima6_store_4904), series = 'ARIMA6', na.rm=TRUE) +
+  autolayer(fitted(forecast_arima7_store_4904), series = 'ARIMA7', na.rm=TRUE, linetype = "dashed") +
+  scale_color_manual(values = c('#7fc97f' ,'#beaed4', '#fdc086')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Creating, Forecasting and Visualizing ARIMA(p,0,q)(P,1,Q) on Training Set
+Following the same Training-Test Set approach introduced in the computations of the Exponential Smoothing models, the in-sample and out-of-sample performance of the above ARIMA models need to be compared in order to find the best one that best fits. More specifically, every model is trained on the Training set (first 76 days of time-series, 80% of the entire time series for store number 4904) then predicts the demand for the next 19 days. The evaluation of the predictions is based on the Test set (last 19 days of initial time-series, 20% of the entire time series for store number 4904) and based on those values the forecast errors of each model are computed. 
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Training set arima 
+training_arima5_store_4904 <- arima(training_ts_store_4904, order = c(1, 0 ,4), 
+                                    seasonal = list(order = c(0, 1, 1), period = 7))
+training_arima6_store_4904 <- arima(training_ts_store_4904, order = c(1, 0 ,5), 
+                                    seasonal = list(order = c(0, 1, 1), period = 7))
+training_arima7_store_4904 <- arima(training_ts_store_4904, order = c(1, 0 ,6), 
+                                    seasonal = list(order = c(0, 1, 1), period = 7))
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Forecast using the training set
+forecast_arima5_store_4904 <- forecast(training_arima5_store_4904, h = 19)
+forecast_arima6_store_4904 <- forecast(training_arima6_store_4904, h = 19)
+forecast_arima7_store_4904 <- forecast(training_arima7_store_4904, h = 19)
+```
+
+The ARIMA model with the lowest RMSE and also has the lowest BIC score. ARIMA5 will be used moving forward.	The	ARIMA	(1,0,4)(0,1,1)[7]	is	selected	as	a	final	candidate	for	the	final	prediction.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Test models on out-of sample test set to determine final, best, model
+accuracy_final_arima_4904 <- rbind(accuracy(forecast_arima5_store_4904, test_ts_store_4904),
+                              accuracy(forecast_arima6_store_4904, test_ts_store_4904),
+                              accuracy(forecast_arima7_store_4904, test_ts_store_4904))
+
+accuracy_final_arima_4904_k <- data.frame(accuracy_final_arima_4904, row.names = c('Train', 'Test', 'Train_2', 'Test_2', 'Train_3', 'Test_3'))
+
+accuracy_final_arima_4904_k %>%  kable(caption = "Accuracy of ARIMA Models", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("ARIMA(1,0,4)(0,1,1)", 1, 2) %>%
+  pack_rows("ARIMA(1,0,5)(0,1,1)", 3, 4) %>%
+  pack_rows("ARIMA(1,0,6)(0,1,1))", 5, 6)
+
+best_arima_forecast_store_4904 <- forecast_arima5_store_4904
+```
+
+### Final ARIMA Model
+The best ARIMA model is trained once again on the entire time series of store 4904 in order to provide the most accurate forecast for the 14 day lettuce demand. The model final forecast for the lettuce demand using the ARIMA(1, 0, 4)(0, 1, 1)[7] is modeled below
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Best model plotted
+best_arima_store_4904 <- arima(ts_store_4904, order = c(1, 0 ,4), seasonal = list(order = c(0, 1, 1), period = 7))
+forecast_best_arima_store_4904 <- forecast(best_arima_store_4904, h = 14)
+
+forecast_best_arima_store_4904_k <- data.frame(forecast_best_arima_store_4904, 
+                                               row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15', '22/06/15',
+                                                             '23/06/15', '24/06/15', '25/06/15', '26/06/15', '27/06/15', '28/06/15',
+                                                             '29/06/15'))
+forecast_best_arima_store_4904_k %>%  kable(caption = "Final 14 Day ARIMA Forecast", align = 'c') %>%  kable_styling(full_width = F)
+
+autoplot(forecast_best_arima_store_4904, main = 'Final 14 Day ARIMA(1, 0, 4)(0, 1, 1)[7] Forecast', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_best_arima_store_4904), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+```
+
+### Forecast Further Improvements
+The model must be checked by a residual analysis to see for further improvements. Much like the ETS model, there needs to be no correlations between the forecast errors of the model in the time series.
+
+By looking at the residuals plot, shown by the checkresiduals() function and then plotted again for better interpretability, it seems that the forecast errors have almost a constant variance and a mean of 0. This statement is validated further by examining the histogram. The histogram plot shows the forecast errors with an overlaid normal curve that has a mean of zero and roughly the same distribution as the forecast errors. It is interesting to note that it looks like a slight right skweness may exist.  
+
+The Ljung-Box	test statistic considers the first "h" autocorrelations values together. A significant test (small p-value) indicates the data are probably not white noise. The test is perfomed on lags 1 - 20 and the the null hypothesis is the independence of the time series. The Box.test() results in a test statistic of 24.747 and a p-value of 0.211. These are large values and the null hypotheisis of indipenditely distributed forecast errors is accepted. 
+
+Using ggplots, ggACF() function, lags 1 - 19 are visually displayed. Autocorrelation is where an error at one point in time travels to a subsequent point in time. Obsebserving this ACF plot allows us to see that no lag is  significant as no lag touches the blue lines. Therefore it can be concluded that 	that	there	is	no	serial	autocorrelation	between	lags	1-19.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Ljung-Box Test
+Box.test(forecast_best_arima_store_4904$residuals, lag = 20, type = 'Ljung-Box')
+
+## These plots are descriptive but they can be improved to increase interpretability by plotting and optimising each one individually
+## Lets focus on the residuals plot in order to determine if they have constant variance (desired)
+autoplot(forecast_best_arima_store_4904$residuals, main = 'Forecast Errors ARIMA(1, 0, 4)(0, 1, 1)[7]', ylab = '(1, 0, 4)(0, 1, 1)[7] Residuals', xlab = 'Time Horizon', col = 'steelblue') + 
+  scale_x_continuous(breaks = seq(5, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+## Next lets look at the ACF plot
+ggAcf(forecast_best_arima_store_4904$residuals, main = 'Autocorrelation Function (ACF) on ARIMA(1, 0, 4)(0, 1, 1)[7] Residuals') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## Histogram
+h <- hist(forecast_best_arima_store_4904$residuals, breaks = 20, col = '#a1d99b', 
+          main = 'Distribution of Forecast Errors on ETS(ANA)', xlab = 'Residuals')
+xfit<-seq(min(forecast_best_arima_store_4904$residuals),max(forecast_best_arima_store_4904$residuals),length=40)
+yfit<-dnorm(xfit,mean=mean(forecast_best_arima_store_4904$residuals),sd=sd(forecast_best_arima_store_4904$residuals))
+yfit <- yfit*diff(h$mids[1:2])*length(forecast_best_arima_store_4904$residuals)
+lines(xfit, yfit, col="#31a354", lwd=2)
+```
+
+The four tests above help conclude that the ARIMA(1, 0, 4)(0, 1, 1)[7] model is a suficient predictive model with no possible further improvments when trying to predict the lettuce demand for store number 4904.
+
+### Final Forecast for Resturant 4904: ETS(A,N,A) vs. ARIMA(1, 0, 4)(0, 1, 1)[7]
+The candidate models have been determined to the ETS(A,N,A) and the ARIMA(1, 0, 4)(0, 1, 1)[7] as these had the best in-sample and out-of-sample scores for their respective model classes.
+
+The models are now compared against eachother below and the model with the lowest RMSE will be determined the best model for lettuce demand forecasting for store 4904.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Checking which model based on RMSE (ETS or ARIMA)
+accuracy_final_model_all_4904 <- rbind(accuracy(forecast_ets_store_4904, test_ts_store_4904),
+                              accuracy(best_arima_forecast_store_4904, test_ts_store_4904))
+
+accuracy_final_model_all_4904_k <- data.frame(accuracy_final_model_all_4904, 
+                                               row.names = c('Train', 'Test', 'Train_2', 'Test_2'))
+
+accuracy_final_model_all_4904_k %>%  kable(caption = "Accuracy of Best ETS and ARIMA", align = 'c') %>%  
+  kable_styling(full_width = F) %>%
+  pack_rows("ETS(A,N,A)", 1, 2) %>%
+  pack_rows("ARIMA(1,0,4)(0,1,1)", 3, 4) 
+
+```
+
+ARIMA(1, 0, 4)(0, 1, 1)[7] appears to fit the data better than the ETS model and similarly has better forecasting power than the ETS model. This is based on the in-sample (Training set) and out-of-sample (Test set) RMSE scores. It is therefore selected as the final forecast model for store number 4904. It is trained on the entire time series in order to enhance its forecasting power, and made to forecast 14 days.
+
+The final forecast of lettuce demand for store number 4904 from 06/16/2015 to 06/29/2015 is saved on a csv file.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Best model
+final_store_4904 <- forecast(arima5_store_4904, h = 14)
+
+autoplot(final_store_4904, main = 'Forecasted Lettuce Demand of Restaurant 4904', ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(final_ets_store_4904), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+
+## Write to csv
+write.csv(final_store_4904, 'store_4904_forecast.csv')
+
+## Final Forecast (Table)
+final_store_4904_k <- data.frame(final_store_4904, 
+                                 row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15', '22/06/15', '23/06/15',
+                                               '24/06/15', '25/06/15', '26/06/15', '27/06/15', '28/06/15', '29/06/15'))
+final_store_4904_k %>%  kable(caption = "Final 14 Day ARIMA Forecast", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+
+
+## Resturant 12631: New York, New York
+The dataframe created for StoreNumber 12631 has two columns, a date column and a lettuce quantity column. This type of dataframe can be converted into a time series object in R using the ts() function. A timeseries is a series of data points ordered in time. In a time series, time is often the independent variable and the goal is usually to make a forecast for the future, exactly what we are trying to do here. The ts() function converts a numeric vector into a R time series object.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The steps above must be repeated for the remaining stores. This section will focus on store number 12631
+ts_store_12631 <- ts(store_12631[, 2], frequency = 7, start (03, 05))
+autoplot(ts_store_12631,  main="Lettuce Demand in Store 12631", xlab="Time Horizon", ylab="Lettuce Quantity (ounces)", 
+         col = "darkblue", frame.plot = FALSE)  + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### STL Decomposition and Visualisation
+The bar on the trend pattern is larger than the grey bar on the data panel. This indicates that the tredn signal is large relative to the variation in the data. The seasonal panel is the largest box compared to the data and trend boxes, this indicates that the variation attributed to the seasonal is much smaller than the trend components and is consequently only a small part of the variation in the data series. The variation attributed to the seasonal is considerably smaller than the stochastic component (the remainders). 
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Seasonal Decompsotion of Time Series 
+plot(stl(ts_store_12631, s.window = "period"), main="Seasonal Decomposition of Time Series Lettuce Demand of Store 12631", xaxt = 'n')
+
+ggsubseriesplot(ts_store_12631, main = 'Time Series Sub-Series Plot', ylab = 'Lettuce Quantity (in Ounces)', 
+                xlab = 'Time Horizon') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+
+ggAcf(ts_store_12631, main = 'Autocorrelation Function (ACF) on Time Series') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Initial Holt-Winters and ETS Functions
+Initially, a “ZZZ” model is created in order to have R automatically fit the Error, Trend and Seasonality values of the time series. This initial model will return letters which will be used throughout the remaineder of the sotre numbher 12631 forecast process.
+
+The Holt-Winters model, the fitted ETS model and the actual time series are plotted for visual interpretability.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Holt-Winters and ETS
+HW_store_12631 <- HoltWinters(ts_store_12631, seasonal = 'multiplicative', beta = FALSE)
+
+ets_store_12631 <- ets(ts_store_12631, model = 'ZZZ')
+ets_store_12631
+
+plot(HW_store_12631, main="Holt-Winters - ETS (M,A,M) in-sample performance", xlab="Time Horizon", ylab="Estimated (fitted) values of lettuce demand (ounces)", lty = 1, col = "black", frame.plot = FALSE)            #dark line:original data, red line: our estimation
+lines(fitted(ets_store_12631), col = "blue", lty = 2)
+legend("bottom", legend=c("Actual","HW", "ETS"), col=c("black", "red", "blue"), box.lty=0, lty=c(1,1,2), cex=0.8)
+```
+
+### Training and Test Set
+The test set needs to be the most recent part of the data as the idea is to simulate a production environment, where after the model is trained it would be evaluated on data it had not seen. Throughout this forecasting project an 80:20 split is used. That is, 80% of the time series data will be attributed to the training set and the most recent 20% will be used for the test set.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Training and Test sets
+training_ts_store_12631 <-  ts(store_12631[1:83,2], frequency = 7)
+length(training_ts_store_12631)
+
+test_ts_store_12631 <- store_12631[84:nrow(store_12631), 2]
+length(test_ts_store_12631)
+
+length(test_ts_store_12631) + length(training_ts_store_12631)
+length(ts_store_12631)
+```
+
+### Creating, Forecasting and Visualizing Holt-Winters on Training Set
+The initial Holt-Winters model will now be trained on in-sample data and it will forecast 20 days past the last day of the training data. This is done using the forecast()function which takes the model and a argument, h, the number of periods it should forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Creating Holt-Winters filtering of the training time series for store 12631. Beta is set to false to force exponential smoothing 
+training_HW_store_12631 <- HoltWinters(training_ts_store_12631, beta = FALSE)
+forecast_HW1_store_12631 <- forecast(training_HW_store_12631, h = 20)
+
+autoplot(forecast_HW1_store_12631, main = 'Training Set Holt-Winters Forecast 12631', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_HW1_store_12631), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 16, by = 2)) +
+  scale_y_continuous(breaks = c(150, 200, 250, 300, 350, 400, 450))  + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Creating, Forecasting and Visualizing ETS(MNM) on Training Set
+The initial ETS model with a model paramet = ‘MNM’, a model with an additive level and seasonal component, will now be trained on in-sample data and it will forecast 20 days past the last day of the training data. This is done using the forecast()function which takes the model and a argument, h, the number of periods it should forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## ## ETS models use maximum likelihood, the probability of the data arising from the specified model. ETS automatically chooses the best type of model. Convenient for forecasting timeseries that have trends or seasonality. Lets explore...
+training_ets_store_12631 <- ets(training_ts_store_12631, model = 'MNM')
+forecast_ets_store_12631 <- forecast(training_ets_store_12631, h = 20)
+
+autoplot(forecast_ets_store_12631, main = 'Training Set ETS(M,N,M) Forecast 12631', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_ets_store_12631), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 16, by = 2)) +
+  scale_y_continuous(breaks = c(150, 200, 250, 300, 350, 400, 450)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Out-Of-Sample Model Comparison
+The performance metric used for evaluation is the RMSE. By looking at the results of each accuracy test. The ETS model not only fits the data better, but it also seems to predict it better. Because the ETS model has both a better in-sample and out-of-sample RMSE score and preformance it is selected as the better model and will be tested again later, during the ARIMA forecast process.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Accuracy Comparison of ETS and Holt-Winter
+accuracy_ets_HW_12631 <- rbind(accuracy(forecast_HW1_store_12631, test_ts_store_12631),
+                              accuracy(forecast_ets_store_12631, test_ts_store_12631))
+
+accuracy_ets_HW_12631_k <- data.frame(accuracy_ets_HW_12631, row.names = c('Train', 'Test', 'Train_2', 'Test_2'))
+
+accuracy_ets_HW_12631_k %>%  kable(caption = "Accuracy of Best ETS and HW", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("Holt-Winters", 1, 2) %>%
+  pack_rows("ETS(M,N,A)", 3, 4) 
+```
+
+### Final ETS Model
+The final ETS(MNM) model is trained on the entire time series relating to store number 12631. This is done in order to give the most accurate 14 day lettuce demand forecast for the store. Again, the forecast() function is used, this time with an “h” argument of 14.
+
+The ETS model and the forecast is presented visually below.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The ETS model is supieror to the Holt-Winter model because ME, RMSE, MAE, MAPE, and MASE are all lower when comparing the models. The ETS model will be trained on all the data and finally used to forecast the 14 day period (06/16/2015 to 06/29/2015)
+final_ets_store_12631 <- forecast(ets_store_12631, h = 14)
+
+final_ets_store_12631_k <- data.frame(final_ets_store_12631, 
+                                      row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15',
+                                                    '21/06/15', '22/06/15', '23/06/15', '24/06/15', '25/06/15',
+                                                    '26/06/15', '27/06/15', '28/06/15', '29/06/15'))
+final_ets_store_12631_k %>%  kable(caption = "Final 14 Day ETS Forecast", align = 'c') %>%  kable_styling(full_width = F)
+
+autoplot(final_ets_store_12631, main = 'Final 14 Day ETS (M,N,M) Forecast 12631', ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(final_ets_store_12631), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+```
+
+### Forecast Further Improvements
+The Ljung-Box test statistic considers the first “h” autocorrelations values together. A significant test (small p-value) indicates the data are probably not white noise. It is a way to test for the absence of serial autocorrelation and we desire a small p-value in order to conclude our model is sufficiently forecasted. The test is perfomed on lags 1 - 20 and the the null hypothesis is the independence of the time series. The Box.test() results in a test statistic of 17.696 and a p-value of 0.6074. These are large values and the null hypotheisis of indipenditely distributed forecast errors is accepted.
+
+From the ACF plot, someone can conclude that there is no serial autocorrelation between at lages 1-19, since all lags are between the significant bounds.
+
+In addition, the forecast errors are tested on whether they are normally distributed with a zero mean and a constant variable. The forecast errors’ constant variance is tested by a time plot of the in-sample forecast errors, whereas their normal distribution with zero mean by a histogram plot of the forecast errors, with an overlaid normal curve that has mean zero and the same standard deviation as the distribution of forecast errors, although the distribution might have some slight left skewness.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Ljung-Box 
+Box.test(final_ets_store_12631$residuals, lag=20, type="Ljung-Box")
+
+## These plots are descriptive but they can be improved to increase interpretability by plotting and optimising each one individually
+## Lets focus on the residuals plot in order to determine if they have constant variance (desired)
+autoplot(final_ets_store_12631$residuals, main = 'Forecast Errors ETS (M,N,M)', ylab = 'ETS (M,N,M) Residuals', col = 'steelblue') + 
+  scale_x_continuous(breaks = seq(5, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+## Next lets look at the ACF plot
+ggAcf(final_ets_store_12631$residuals, main = 'Autocorrelation Function (ACF) on ETS (M,N,M) Residuals') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 22, by = 2))
+
+## Histogram of residuals
+h <- hist(final_ets_store_12631$residuals, breaks = 20, col = '#a1d99b', 
+          main = 'Distribution of Forecast Errors on ETS(MNM)', xlab = 'Residuals')
+xfit<-seq(min(final_ets_store_12631$residuals),max(final_ets_store_12631$residuals),length=40)
+yfit<-dnorm(xfit,mean=mean(final_ets_store_12631$residuals),sd=sd(final_ets_store_12631$residuals))
+yfit <- yfit*diff(h$mids[1:2])*length(final_ets_store_12631$residuals)
+lines(xfit, yfit, col="#31a354", lwd=2)
+```
+
+The four tests above help conclude that the ETS(ANA) model is an suficient predictive model with no possible further improvments when trying to predict the lettuce demand for store number 12631.
+
+### ARIMA Forecast Models
+The next step in the project is to develop and ARIMA model that is able to forecast lettuce demand. The ARIMA model will then be compared with the final ETS model above to determine what the truest and most accurate forecast model is.
+
+The outlined tests are completed below in order to determine any trends that might or might not have to be taken into account in the ARIMA model.
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Arima 12631
+autoplot(ts_store_12631) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))## The time series does not look stationary and appears to have multiplicative seasonality as the highs and low get more extreme as the time series goes on. This needs to be addressed by taking the logarithm of the time series to smoothen it out
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Logarithm of TS
+log_ts_store_12631 <- log(ts_store_12631)
+autoplot(log_ts_store_12631) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+## Differencing is a way of making a time series stationary; this means that you remove any systematic patterns such as trend and seasonality from the data
+diff_log_ts_store_12631 <- diff(log_ts_store_12631, lag = frequency(log_ts_store_12631), differences = 1)
+autoplot(diff_log_ts_store_12631) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Arima Model
+## Testing if timeseries of store is stationary
+adf.test(ts_store_12631) ## Augmented Dickey–Fuller (ADF) t-statistic test to find if the series has a unit root (a series with a trend line will have a unit root and result in a large p-value)
+kpss.test(ts_store_12631, null = 'Trend') ## Kwiatkowski-Phillips-Schmidt-Shin (KPSS) tests he null hypothesis of trend stationarity (a low p-value will indicate a signal that is not trend stationary, has a unit root) 
+ndiffs(ts_store_12631)
+nsdiffs(ts_store_12631)
+pp.test(ts_store_12631)
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Next lets look at the ACF plot for the differences
+acf(diff_log_ts_store_12631, lag.max = 20)
+
+ggAcf(diff_log_ts_store_12631, main = 'Autocorrelation Function (ACF) of Seasonal Differenced Time-Series') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## The partial autocorrelation function gives the partial correlation of a stationary time series with its own lagged values, regressed the values of the time series at all shorter lags. It contrasts with the autocorrelation function, which does not control for other lags.
+ggPacf(diff_log_ts_store_12631, main = 'Partial Autocorrelation Function (PACF) of Seasonal Differenced Time-Series') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## Initial auto.arima model that finds 'best model' 
+auto.arima(ts_store_12631, trace = TRUE, ic = 'bic', approximation = FALSE, lambda = 0) ## Best model is determined to be: Best model: ARIMA(0,1,1)(0,0,2)[7] log likelihood=41.68 AIC=-75.35   AICc=-74.94   BIC=-64.85
+```
+
+### Manual ARIMA Functions
+The next step is to utilise the information the differentiated ACF and PACF plots have provided along with the best models the auto.arima() function has provided in order to create multiple ARIMA models that will be used to forecast the lettuce demand and compared with each other using the accuracy() function.
+
+All the tests above, along with the best model of the auto.arima() should be a possible form or variation of ARIMA(p,0,q)(P,0,Q). The section below tests variations of the possible base form.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Testing various Arima models using lambda = 0 to estimate log data
+arima1_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (0, 0, 1), period = 7), include.drift = TRUE, lambda = 0)
+arima2_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), include.drift = TRUE)
+arima3_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (0, 0, 2), period = 7), include.drift = TRUE, lambda = 0)
+arima4_store_12631 <- Arima(ts_store_12631, order = c(1, 1, 1), seasonal = list(order = c (0, 0, 2), period = 7), include.drift = TRUE, lambda = 0)
+arima5_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (0, 0, 2), period = 7), lambda = 0)
+arima6_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (0, 0, 1), period = 7), lambda = 0)
+arima7_store_12631 <- Arima(ts_store_12631, order = c(1, 1, 1), seasonal = list(order = c (0, 0, 2), period = 7), lambda = 0)
+arima8_store_12631 <- Arima(ts_store_12631, order = c(1, 1, 2), seasonal = list(order = c (0, 0, 2), period = 7), lambda = 0)
+arima9_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (0, 0, 3), period = 7), lambda = 0)
+arima10_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (1, 0, 2), period = 7), lambda = 0)
+arima11_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (1, 0, 3), period = 7), lambda = 0)
+arima12_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (1, 0, 1), period = 7), lambda = 0)
+```
+
+The forecast function is used on each ARIMA model and used with a 14 number period forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Forecast
+forecast_arima1_store12631 <- forecast(arima1_store_12631, h = 14)
+forecast_arima2_store12631 <- forecast(arima2_store_12631, h = 14)
+forecast_arima3_store12631 <- forecast(arima3_store_12631, h = 14)
+forecast_arima4_store12631 <- forecast(arima4_store_12631, h = 14)
+forecast_arima5_store12631 <- forecast(arima5_store_12631, h = 14)
+forecast_arima6_store12631 <- forecast(arima6_store_12631, h = 14)
+forecast_arima7_store12631 <- forecast(arima7_store_12631, h = 14)
+forecast_arima8_store12631 <- forecast(arima8_store_12631, h = 14)
+forecast_arima9_store12631 <- forecast(arima9_store_12631, h = 14)
+forecast_arima10_store12631 <- forecast(arima10_store_12631, h = 14)
+forecast_arima11_store12631 <- forecast(arima11_store_12631, h = 14)
+forecast_arima12_store12631 <- forecast(arima12_store_12631, h = 14)
+```
+
+### In-Sample Comparison
+The performance metric used for evaluation is the RMSE. By looking at the results of each one, the lowest RMSE is from ARIMA11 (37.19971), while ARIMA10 and ARIMA12 are next two best with RMSE scores of 37.19998 and 37.79983 respectively. The best three ARIMA models will be improved and visually displayed.
+
+``` {r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Accuracy stores Training Sets
+accuracy_arima_12631 <- rbind(accuracy(forecast_arima1_store12631), accuracy(forecast_arima2_store12631), accuracy(forecast_arima3_store12631),
+           accuracy(forecast_arima4_store12631), accuracy(forecast_arima5_store12631), accuracy(forecast_arima6_store12631),
+           accuracy(forecast_arima7_store12631), accuracy(forecast_arima8_store12631), accuracy(forecast_arima9_store12631),
+           accuracy(forecast_arima10_store12631), accuracy(forecast_arima11_store12631), accuracy(forecast_arima12_store12631))
+
+accuracy_arima_12631_k <- data.frame(accuracy_arima_12631, 
+                                     row.names = c('ARIMA(0,1,1)(0,0,1)', 'ARIMA(0,1,1)', 'ARIMA(0,1,1)(0,1,2)',
+                                                   'ARIMA(1,1,1)(0,0,2)', 'ARIMA(0,1,1)(0,0,2)', 'ARIMA(1,1,1)(1,0,1)',
+                                                   'ARIMA(1,1,1)(0,0,3)', 'ARIMA(1,1,2)(0,0,2)', 'ARIMA(0,1,1)(0,0,3)',
+                                                   'ARIMA(0,1,1)(1,0,2)','ARIMA(0,1,1)(1,0,3))','ARIMA(0,1,1)(1,0,1)'))
+
+accuracy_arima_12631_k %>%  kable(caption = "Accuracy of ARIMA Model", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Plotting the best three models (lowest training set RMSE)
+autoplot(ts_store_12631) +
+  autolayer(fitted(forecast_arima10_store12631), series = 'ARIMA10', na.rm=TRUE, linetype = "dashed") +
+  autolayer(fitted(forecast_arima11_store12631), series = 'ARIMA11', na.rm=TRUE, linetype = 'dashed') +
+  autolayer(fitted(forecast_arima12_store12631), series = 'ARIMA12', na.rm=TRUE, linetype = "dashed") +
+  scale_color_manual(values = c('#7fc97f' ,'#beaed4', '#fdc086')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+```
+
+### Creating, Forecasting and Visualizing ARIMA(p,1,q)(P,0,Q)[7] on Training Set
+Following the same Training-Test Set approach introduced in the computations of the Exponential Smoothing models, the in-sample and out-of-sample performance of the above ARIMA models need to be compared in order to find the best one that best fits. More specifically, every model is trained on the Training set (first 80 days of time-series, 80% of the entire time series for store number 12631) then predicts the demand for the next 23 days. The evaluation of the predictions is based on the Test set (last 23 days of initial time-series, 20% of the entire time series for store number 12631) and based on those values the forecast errors of each model are computed.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Train best models on training set
+training_arima10_store_12631 <- Arima(training_ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (1, 0, 2), period = 7), lambda = 0)
+training_arima11_store_12631 <- Arima(training_ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (1, 0, 3), period = 7), lambda = 0)
+training_arima12_store_12631 <- Arima(training_ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (1, 0, 1), period = 7), lambda = 0)
+
+## Forecast using the best models
+forecast_arima10_store12631 <- forecast(training_arima10_store_12631, h = 23)
+forecast_arima11_store12631 <- forecast(training_arima11_store_12631, h = 23)
+forecast_arima12_store12631 <- forecast(training_arima12_store_12631, h = 23)
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Re-transform logged data
+forecast_arima10_store12631$mean <-exp(forecast_arima10_store12631$model$sigma2/2) * forecast_arima10_store12631$mean
+forecast_arima10_store12631$lower <-exp(forecast_arima10_store12631$model$sigma2/2) * (forecast_arima10_store12631$lower)
+forecast_arima10_store12631$x <-exp(forecast_arima10_store12631$model$sigma2/2) * (forecast_arima10_store12631$x)
+forecast_arima10_store12631$upper <-exp(forecast_arima10_store12631$model$sigma2/2) * (forecast_arima10_store12631$upper)
+forecast_arima11_store12631$mean <-exp(forecast_arima11_store12631$model$sigma2/2) * forecast_arima11_store12631$mean
+forecast_arima11_store12631$lower <-exp(forecast_arima11_store12631$model$sigma2/2) * (forecast_arima11_store12631$lower)
+forecast_arima11_store12631$x <-exp(forecast_arima11_store12631$model$sigma2/2) * (forecast_arima11_store12631$x)
+forecast_arima11_store12631$upper <-exp(forecast_arima11_store12631$model$sigma2/2) * (forecast_arima11_store12631$upper)
+forecast_arima12_store12631$mean <-exp(forecast_arima12_store12631$model$sigma2/2) * forecast_arima12_store12631$mean
+forecast_arima12_store12631$lower <-exp(forecast_arima12_store12631$model$sigma2/2) * (forecast_arima12_store12631$lower)
+forecast_arima12_store12631$x <-exp(forecast_arima12_store12631$model$sigma2/2) * (forecast_arima12_store12631$x)
+forecast_arima12_store12631$upper <-exp(forecast_arima12_store12631$model$sigma2/2) * (forecast_arima12_store12631$upper)
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Test models on out-of sample test set to determine final, best, model
+accuracy_final_arima_12631 <- rbind(accuracy(forecast_arima10_store12631, test_ts_store_12631),
+                              accuracy(forecast_arima11_store12631, test_ts_store_12631),
+                              accuracy(forecast_arima12_store12631, test_ts_store_12631))
+
+accuracy_final_arima_12631_k <- data.frame(accuracy_final_arima_12631, row.names = c('Train', 'Test', 'Train_2', 'Test_2', 'Train_3', 'Test_3'))
+
+accuracy_final_arima_12631_k %>%  kable(caption = "Accuracy of ARIMA Models", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("ARIMA(0,1,1)(1,0,2)", 1, 2) %>%
+  pack_rows("ARIMA(0,1,1)(1,0,3)", 3, 4) %>%
+  pack_rows("ARIMA(0,1,1)(3,0,1))", 5, 6)
+```
+
+### Final ARIMA Model
+The best ARIMA model is trained once again on the entire time series of store 20974 in order to provide the most accurate forecast for the 14 day lettuce demand. The model final forecast for the lettuce demand using the ARIMA(1, 0, 1)(1, 0, 3)[7] is modeled below.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Train best model on the entire dataset from store 12631]
+best_arima11_store_12631 <- Arima(ts_store_12631, order = c(0, 1, 1), seasonal = list(order = c (1, 0, 3), period = 7), lambda = 0)
+forecast_best_arima_store_12631 <- forecast(best_arima11_store_12631, h = 14)
+
+# Best model table
+forecast_best_arima_store_12631_k <- data.frame(forecast_best_arima_store_12631, 
+                                                row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15',
+                                                              '22/06/15', '23/06/15', '24/06/15', '25/06/15', '26/06/15', '27/06/15',
+                                                              '28/06/15', '29/06/15'))
+forecast_best_arima_store_12631_k %>%  kable(caption = "Final 14 Day ARIMA Forecast", align = 'c') %>%  kable_styling(full_width = F)
+
+## Best model plotted
+autoplot(forecast_best_arima_store_12631, main = 'Final 14 Day ARIMA(0, 1, 1)(1, 0, 3)[7] Forecast', ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_best_arima_store_12631), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+```
+
+### Forecast Further Improvements
+The model must be checked by a residual analysis to see for further improvements. Much like the ETS model, there needs to be no correlations between the forecast errors of the model in the time series.
+
+The Ljung-Box test statistic considers the first “h” autocorrelations values together. A significant test (small p-value) indicates the data are probably not white noise. The test is perfomed on lags 1 - 20 and the the null hypothesis is the independence of the time series. The Box.test() results in a test statistic of 13.58 and a p-value of 0.8507. These are large values and the null hypotheisis of indipenditely distributed forecast errors is accepted.
+
+Using ggplots, ggACF() function, lags 1 - 19 are visually displayed. Obsebserving this ACF plot allows us to see that there is no serial autocorrelation between lags 1-19.
+
+The forecast errors’ constant variance is tested by a time plot of the in-sample forecast errors, whereas their normal distribution with zero mean by a histogram plot of the forecast errors, with an overlaid normal curve that has mean zero and the same standard deviation as the distribution of forecast errors.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Ljung-Box Test
+Box.test(forecast_best_arima_store_12631$residuals, lag = 20, type = 'Ljung-Box')
+
+## These plots are descriptive but they can be improved to increase interpretability by plotting and optimising each one individually
+## Lets focus on the residuals plot in order to determine if they have constant variance (desired)
+
+autoplot(forecast_best_arima_store_12631$residuals, main = 'Forecast Errors ARIMA(0, 1, 1)(1, 0, 3)[7])', 
+         ylab = 'ARIMA(0, 1, 1)(1, 0, 3)[7] Residuals', col = 'steelblue') + 
+  scale_x_continuous(breaks = seq(5, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+## Next lets look at the ACF plot
+ggAcf(forecast_best_arima_store_12631$residuals, main = 'Autocorrelation Function (ACF) on ARIMA(0, 1, 1)(1, 0, 3)[7] Residuals') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+h <- hist(forecast_best_arima_store_12631$residuals, breaks = 20, col = '#a1d99b', 
+          main = 'Distribution of Forecast Errors on ARIMA(0, 1, 1)(1, 0, 3)[7]', xlab = 'Residuals')
+xfit<-seq(min(forecast_best_arima_store_12631$residuals),max(forecast_best_arima_store_12631$residuals),length=40)
+yfit<-dnorm(xfit,mean=mean(forecast_best_arima_store_12631$residuals),sd=sd(forecast_best_arima_store_12631$residuals))
+yfit <- yfit*diff(h$mids[1:2])*length(forecast_best_arima_store_12631$residuals)
+lines(xfit, yfit,col="#31a354", lwd=2)
+```
+
+The plotted residuals and the histogram show that the forecast errors have constant variance over time and are normally distributed with mean of zero. It is conclusive that ARIMA(0, 1, 1)(1, 0, 3)[7] provides an adequate preditive model for the lettuce demand of store 12631.
+
+### Final Forecast for Resturant 12631: ETS(M,N,M) vs. ARIMA(0, 1, 1)(1, 0, 3)[7]
+The candidate models have been determined to the ETS(M,N,M) and the ARIMA(0, 1, 1)(1, 0, 3)[7] as these had the best in-sample and out-of-sample scores for their respective model classes.
+
+The models are now compared against eachother below and the model with the lowest RMSE will be determined the best model for lettuce demand forecasting for store 20974.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Checking which model based on RMSE (ETS or ARIMA)
+accuracy_final_model_all_12631 <- rbind(accuracy(forecast_ets_store_12631, test_ts_store_12631),
+                              accuracy(forecast_arima11_store12631, test_ts_store_12631))
+
+accuracy_final_model_all_12631_k <- data.frame(accuracy_final_model_all_12631, 
+                                               row.names = c('Train', 'Test', 'Train_2', 'Test_2'))
+
+accuracy_final_model_all_12631_k %>%  kable(caption = "Accuracy of Best ETS and ARIMA", align = 'c') %>%  
+  kable_styling(full_width = F) %>%
+  pack_rows("ETS(M,N,M)", 1, 2) %>%
+  pack_rows("ARIMA(0,1,1)(1,0,3)", 3, 4) 
+```
+
+ETS(M,N,M) appears to fit the data better than the ARIMA model and similarly has better forecasting power than the ARIMA model. This is based on the in-sample (Training set) and out-of-sample (Test set) RMSE scores. It is therefore selected as the final forecast model for store number 12631. It is trained on the entire time series in order to enhance its forecasting power, and made to forecast 14 days.
+
+The final forecast of lettuce demand for store number 20794 from 06/16/2015 to 06/29/2015 is saved on a csv file.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Final model for store 12631
+final_store_12631 <- forecast(ets_store_12631, h = 14)
+autoplot(final_store_12631, main = 'Final 14 Day ETS(MNM) Forecast', ylab = 'Lettuce Quantity (in Ounces)', 
+         xlab = 'Time Horizon') + 
+  autolayer(fitted(final_store_12631), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+
+## Forecast results to csv
+write.csv(final_store_12631, 'store_12631_forecast.csv')
+
+## Final Forecast (Table)
+final_store_12631_k <- data.frame(final_store_12631, 
+                                  row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15', '22/06/15',
+                                                '23/06/15', '24/06/15', '25/06/15', '26/06/15', '27/06/15', '28/06/15', '29/06/15'))
+final_store_12631_k %>%  kable(caption = "Final 14 Day ETS (ANA) Forecast", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+
+## Resturant 46673: Berkeley, California 
+The dataframe created for StoreNumber 4904 has two columns, a date column and a lettuce quantity column. This type of dataframe can be converted into a time series object in R using the ts() function. A timeseries is a series of data points ordered in time. In a time series, time is often the independent variable and the goal is usually to make a forecast for the future, exactly what we are trying to do here. The ts() function converts a numeric vector into a R time series object.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Store 46673
+ts_store_46673 <- ts(store_46673[, 2], frequency = 7, start (03, 05))
+autoplot(ts_store_46673, main="Lettuce Demand in Store 4904 ", xlab="Time Horizon", ylab="Lettuce Quantity (ounces)", col = "darkblue", frame.plot = FALSE)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### STL Decomposition and Visualisation
+The bar on the seasonal pattern is larger than the grey bar on the data panel. This indicates that the seasonal signal is large relative to the variation in the data. The trend panel is the largest box compared to the data and seasonal boxes, this indicates that the variation attributed to the trend is much smaller than the seasonal components and is consequently only a small part of the variation in the data series. The variation attributed to the trend is considerably smaller than the stochastic component (the remainders). As such, we can deduce that these data do not exhibit a trend.
+
+``` {r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+##  Viusalising the data, with its seasonal, trend and remainder component. 
+plot(stl(ts_store_46673, s.window = "period"), main="Seasonal Decomposition of Time Series Lettuce Demand of Store 46673", xaxt = 'n')
+
+## Various other ggplot2 package plots are used to gain understanding of the data
+ggsubseriesplot(ts_store_46673, main = 'Time Series Sub-Series Plot', ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+ggAcf(ts_store_46673, main = 'Autocorrelation Function (ACF) on Time Series') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+```
+
+### Initial Holt-Winters and ETS Functions
+Initially, a “ZZZ” model is created in order to have R automatically fit the Error, Trend and Seasonality values of the time series. This initial model will return letters which will be used throughout the remaineder of the store number 46673 forecast process.
+
+The Holt-Winters model, the fitted ETS model and the actual time series are plotted for visual interpretability.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Initial Holt-Winters with exponential smoothing
+HW_store_46673 <- HoltWinters(ts_store_46673, beta = FALSE)
+
+## Initial ETS model with automatic fitting for the E, T, S
+ets_store_46673 <- ets(ts_store_46673, model = 'ZZZ')
+ets_store_46673 ## Automatic model concludes a M,N,A model is best for this data
+
+plot(HW_store_46673, main="Holt-Winters - ETS (M,N,A) in-sample performance", xlab="Time Horizon", 
+     ylab="Estimated (fitted) values of lettuce demand (ounces)", lty = 1, col = "black", frame.plot = FALSE)            
+lines(fitted(ets_store_46673), col = "blue", lty = 2)
+legend("bottom", legend=c("Actual","HW", "ETS"), col=c("black", "red", "blue"), box.lty=0, lty=c(1,1,2), cex=0.8) 
+```
+
+### Training and Test Set
+The test set needs to be the most recent part of the data as the idea is to simulate a production environment, where after the model is trained it would be evaluated on data it had not seen. Throughout this forecasting project an 80:20 split is used. That is, 80% of the time series data will be attributed to the training set and the most recent 20% will be used for the test set.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Training and Test sets (83 days, 80%)
+training_ts_store_46673 <- ts(store_46673[1:83,2], frequency = 7)
+length(training_ts_store_46673)
+
+## Test set (20 days, 20%)
+test_ts_store_46673 <- store_46673[84:nrow(store_46673),2]
+length(test_ts_store_46673)
+
+length(test_ts_store_46673) + length(training_ts_store_46673) ## Length of training set and test set combined
+length(ts_store_46673) ## Length of time series 
+```
+
+### Creating, Forecasting and Visualizing Holt-Winters on Training Set
+The initial Holt-Winters model will now be trained on in-sample data and it will forecast 20 days past the last day of the training data. This is done using the forecast()function which takes the model and a argument, h, the number of periods it should forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Creating Holt-Winters filtering of the training time series for store 46673. Beta is set to false to force exponential smoothing 
+training_HW_store_46673 <- HoltWinters(training_ts_store_46673, beta = FALSE)
+forecast_HW1_store_46673 <- forecast(training_HW_store_46673, h = 20)
+
+autoplot(forecast_HW1_store_46673, main = 'Training Set Holt-Winters Forecast 46673', ylab = 'Lettuce Quantity (in Ounces)', 
+         xlab = 'Time Horizon', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_HW1_store_46673), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 16, by = 2)) +
+  scale_y_continuous(breaks = c(150, 200, 250, 300, 350, 400, 450))  + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+```
+
+### Creating, Forecasting and Visualizing ETS(ANA) on Training Set
+The initial ETS model with a model paramet = ‘MNA’, a model with an additive level and seasonal component, will now be trained on in-sample data and it will forecast 20 days past the last day of the training data. This is done using the forecast()function which takes the model and a argument, h, the number of periods it should forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## ## ETS models use maximum likelihood, the probability of the data arising from the specified model. ETS automatically chooses the best type of model. Convenient for forecasting timeseries that have trends or seasonality. Lets explore...
+training_ets_store_46673 <- ets(training_ts_store_46673, model = 'MNA')
+forecast_ets_store_46673 <- forecast(training_ets_store_46673, h = 20)
+
+autoplot(forecast_ets_store_46673, main = 'Training Set ETS(M,N,A) Forecast 46673', ylab = 'Lettuce Quantity (in Ounces)', 
+         xlab = 'Time Horizon', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_ets_store_46673), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 16, by = 2)) +
+  scale_y_continuous(breaks = c(150, 200, 250, 300, 350, 400, 450)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+```
+
+### Out-Of-Sample Model Comparison
+The performance metric used for evaluation is the RMSE. By looking at the results of each accuracy test, it can be concluded that the ETS(MNA) model (RMSE = 33.477) is superior to the Holt-Winters model (RMSE = 43.652) as it has a lower RMSE on the out-of-sample data. The ETS model not only fits the data better, but it also seems to predict it better. Because the ETS model has both a better in-sample and out-of-sample RMSE score and preformance it is selected as the better model and will be tested again later, during the ARIMA forecast process.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Accuracy Comparison of ETS and Holt-Winter
+accuracy_ets_HW_46673 <- rbind(accuracy(forecast_HW1_store_46673, test_ts_store_46673),
+                              accuracy(forecast_ets_store_46673, test_ts_store_46673))
+
+accuracy_ets_HW_46673_k <- data.frame(accuracy_ets_HW_46673, row.names = c('Train', 'Test', 'Train_2', 'Test_2'))
+
+accuracy_ets_HW_46673_k %>%  kable(caption = "Accuracy of Best ETS and HW", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("Holt-Winters", 1, 2) %>%
+  pack_rows("ETS(M,N,A)", 3, 4) 
+```
+
+## Final ETS Model
+The final ETS(MNA) model is trained on the entire time series relating to store number 46673. This is done in order to give the most accurate 14 day lettuce demand forecast for the store. Again, the forecast() function is used, this time with an “h” argument of 14.
+
+The ETS model and the forecast is presented visually below.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The ETS model is supieror to the Holt-Winter model because ME, RMSE, MAE, MAPE, and MASE are all lower when comparing the models. The ETS model will be trained on all the data and finally used to forecast the 14 day period (06/16/2015 to 06/29/2015)
+final_ets_store_46673 <- forecast(ets_store_46673, h = 14)
+
+final_ets_store_46673_k <- data.frame(final_ets_store_46673, 
+                                      row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15',
+                                                    '21/06/15', '22/06/15', '23/06/15', '24/06/15', '25/06/15',
+                                                    '26/06/15', '27/06/15', '28/06/15', '29/06/15'))
+final_ets_store_46673_k %>%  kable(caption = "Final 14 Day ETS Forecast", align = 'c') %>%  kable_styling(full_width = F)
+
+autoplot(final_ets_store_46673, main = 'Final 14 Day ETS (M,N,A) Forecast 46673', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(final_ets_store_46673), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+```
+
+### Forecast Further Improvements
+The Ljung-Box test statistic considers the first “h” autocorrelations values together. A significant test (small p-value) indicates the data are probably not white noise. It is a way to test for the absence of serial autocorrelation and we desire a small p-value in order to conclude our model is sufficiently forecasted. The test is perfomed on lags 1 - 20 and the the null hypothesis is the independence of the time series. The Box.test() results in a test statistic of 22.623 and a p-value of 0.3077. These are large values and the null hypotheisis of indipenditely distributed forecast errors is accepted.
+
+The autocorrelation plot (ACF)is a visual way to show serial correlation in data that changes over time and will be the final test used to see if the residuals are white noise. The plot goes hand in hand with the Ljung-Box test. Using ggplots, ggACF() function, lags 1 - 19 are visually displayed. Autocorrelation is where an error at one point in time travels to a subsequent point in time. The blue lines are based on the sampling distribution for autocorrelation assuming the data is white noise. Any spike between the blue lines should be ignored as they are not statistically significant. Spikes out of the blue lines might indicate something interesting in the data that could be used to build a forecasting analysis. Obsebserving this ACF plot allows us to see that only one lag (lag = 11) is significant as it touches the blue lines. Out of the first 20 lags, one is expected to exceed the 95% confidence interval marked by the blue lines, and one lag does just that and this is attributed to randomness.
+
+``` {r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Ljung-Box Test
+Box.test(final_ets_store_46673$residuals, lag = 20, type = 'Ljung-Box')
+
+## These plots are descriptive but they can be improved to increase interpretability by plotting and optimising each one individually
+## Lets focus on the residuals plot in order to determine if they have constant variance (desired)
+autoplot(final_ets_store_46673$residuals, main = 'Forecast Errors ETS (M,N,A)', ylab = 'ETS (M,N,A) Residuals', 
+         xlab = 'Time Horizon', col = 'steelblue') + 
+  scale_x_continuous(breaks = seq(5, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+## Next lets look at the ACF plot
+ggAcf(final_ets_store_46673$residuals, main = 'Autocorrelation Function (ACF) on ETS (M,N,A) Residuals') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 22, by = 2))
+
+## Histogram of residuals
+h <- hist(final_ets_store_46673$residuals, breaks = 20, col = '#a1d99b', main = 'Distribution of Forecast Errors on ETS(MNA)', xlab = 'Residuals')
+xfit<-seq(min(final_ets_store_46673$residuals),max(final_ets_store_46673$residuals),length=40)
+yfit<-dnorm(xfit,mean=mean(final_ets_store_46673$residuals),sd=sd(final_ets_store_46673$residuals))
+yfit <- yfit*diff(h$mids[1:2])*length(final_ets_store_46673$residuals)
+lines(xfit, yfit, col="#31a354", lwd=2)
+```
+
+The four tests above help conclude that the ETS(MNA) model is an suficient predictive model with no possible further improvments when trying to predict the lettuce demand for store number 46673.
+
+### ARIMA Forecast Models
+The next step in the project is to develop and ARIMA model that is able to forecast lettuce demand. The ARIMA model will then be compared with the final ETS model above to determine what the truest and most accurate forecast model is.
+
+The outlined tests are completed below in order to determine any trends that might or might not have to be taken into account in the ARIMA model.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Arima for store 46673
+## Testing if timeseries of store is stationary
+adf.test(ts_store_46673) ## Augmented Dickey–Fuller (ADF) t-statistic test to find if the series has a unit root (a series with a trend line will have a unit root and result in a large p-value)
+kpss.test(ts_store_46673, null = 'Trend') ## Kwiatkowski-Phillips-Schmidt-Shin (KPSS) tests he null hypothesis of trend stationarity (a low p-value will indicate a signal that is not trend stationary, has a unit root) 
+ndiffs(ts_store_46673)
+nsdiffs(ts_store_46673)
+pp.test(ts_store_46673)
+```
+
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Next lets look at the ACF plot for the differences
+ggAcf(ts_store_46673, main = 'Autocorrelation Function (ACF) of Seasonal Differenced Time-Series') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## The partial autocorrelation function gives the partial correlation of a stationary time series with its own lagged values, regressed the values of the time series at all shorter lags. It contrasts with the autocorrelation function, which does not control for other lags.
+ggPacf(ts_store_46673, main = 'Partial Autocorrelation Function (PACF) of Seasonal Differenced Time-Series') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## Initial auto.arima model that finds 'best model' 
+auto.arima(ts_store_46673, trace = TRUE, ic = 'bic') ## Best model is determined to be: Best model: ARIMA(0,0,0)(2,1,0)[7] log likelihood=-464.12
+## AIC=934.23   AICc=934.49   BIC=941.92
+```
+
+### Manual ARIMA Functions
+The next step is to utilise the information the differentiated ACF and PACF plots have provided along with the best models the auto.arima() function has provided in order to create multiple ARIMA models that will be used to forecast the lettuce demand and compared with each other using the accuracy() function.
+
+All the tests above, along with the best model of the auto.arima() should be a possible form or variation of ARIMA(p,0,q)(P,1,Q). The section below tests variations of the possible base form.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Testing various Arima models using lambda = 0 to estimate log data
+arima1_store_46673 <- Arima(ts_store_46673, order = c(1, 0, 0), seasonal = list(order = c (1, 1, 0), period = 7), include.drift = TRUE)
+arima2_store_46673 <- Arima(ts_store_46673, order = c(1, 0, 0), seasonal = list(order = c (2, 1, 0), period = 7), include.drift = TRUE)
+arima3_store_46673 <- Arima(ts_store_46673, order = c(0, 0, 0), seasonal = list(order = c (2, 1, 0), period = 7), include.drift = TRUE)
+arima4_store_46673 <- Arima(ts_store_46673, order = c(0, 0, 0), seasonal = list(order = c (2, 1, 0), period = 7), include.drift = TRUE)
+arima5_store_46673 <- Arima(ts_store_46673, order = c(0, 0, 0), seasonal = list(order = c (1, 0, 0), period = 7))
+arima6_store_46673 <- Arima(ts_store_46673, order = c(1, 0, 0), seasonal = list(order = c (3, 0, 0), period = 7))
+arima7_store_46673 <- Arima(ts_store_46673, order = c(1, 0, 0), seasonal = list(order = c (2, 0, 0), period = 7))
+arima8_store_46673 <- Arima(ts_store_46673, order = c(1, 0, 0), seasonal = list(order = c (2, 0, 1), period = 7))
+arima9_store_46673 <- Arima(ts_store_46673, order = c(1, 0, 0), seasonal = list(order = c (4, 0, 0), period = 7))
+arima10_store_46673 <- Arima(ts_store_46673, order = c(1, 0, 1), seasonal = list(order = c (1, 0, 2), period = 7))
+arima11_store_46673 <- Arima(ts_store_46673, order = c(0, 1, 1), seasonal = list(order = c (1, 0, 3), period = 7))
+arima12_store_46673 <- Arima(ts_store_46673, order = c(1, 1, 1), seasonal = list(order = c (1, 0, 1), period = 7))
+```
+
+The forecast function is used on each ARIMA model and used with a 14 number period forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Forecast
+forecast_arima1_store46673 <- forecast(arima1_store_46673, h = 14)
+forecast_arima2_store46673 <- forecast(arima2_store_46673, h = 14)
+forecast_arima3_store46673 <- forecast(arima3_store_46673, h = 14)
+forecast_arima4_store46673 <- forecast(arima4_store_46673, h = 14)
+forecast_arima5_store46673 <- forecast(arima5_store_46673, h = 14)
+forecast_arima6_store46673 <- forecast(arima6_store_46673, h = 14)
+forecast_arima7_store46673 <- forecast(arima7_store_46673, h = 14)
+forecast_arima8_store46673 <- forecast(arima8_store_46673, h = 14)
+forecast_arima9_store46673 <- forecast(arima9_store_46673, h = 14)
+forecast_arima10_store46673 <- forecast(arima10_store_46673, h = 14)
+forecast_arima11_store46673 <- forecast(arima11_store_46673, h = 14)
+forecast_arima12_store46673 <- forecast(arima12_store_46673, h = 14)
+```
+
+### In-Sample Comparison
+The performance metric used for evaluation is the RMSE. By looking at the results of each one, the lowest RMSE is from ARIMA12 (26.16), while ARIMA10 and ARIMA8 are next two best with RMSE scores of 26.36 and 26.38 respectively. The best three ARIMA models will be improved and visually displayed.
+
+``` {r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Accuracy stores Training Sets
+accuracy_arima_46673 <- rbind(accuracy(forecast_arima1_store46673), accuracy(forecast_arima2_store46673), accuracy(forecast_arima3_store46673),
+           accuracy(forecast_arima4_store46673), accuracy(forecast_arima5_store46673), accuracy(forecast_arima6_store46673),
+           accuracy(forecast_arima7_store46673), accuracy(forecast_arima8_store46673), accuracy(forecast_arima9_store46673),
+           accuracy(forecast_arima10_store46673), accuracy(forecast_arima11_store46673), accuracy(forecast_arima12_store46673))
+
+accuracy_arima_46673_k <- data.frame(accuracy_arima_46673, 
+                                     row.names = c('ARIMA(1,0,0)(1,1,0)', 'ARIMA(1,0,0)(2,1,0)', 'ARIMA(0,0,0)(2,1,0)',
+                                                   'ARIMA(2,0,0)(2,1,0)', 'ARIMA(0,0,0)(1,0,0)', 'ARIMA(1,0,0)(3,0,0)',
+                                                   'ARIMA(1,0,0)(2,0,0)', 'ARIMA(2,0,0)(2,0,1)', 'ARIMA(1,0,0)(4,0,0)',
+                                                   'ARIMA(1,0,1)(1,0,2)','ARIMA(1,1,0)(1,0,3)','ARIMA(1,1,1)(1,0,1)'))
+
+accuracy_arima_46673_k %>%  kable(caption = "Accuracy of ARIMA1 Model", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Plotting the best three models (lowest training set RMSE)
+autoplot(ts_store_46673) +
+  autolayer(fitted(forecast_arima10_store46673), series = 'ARIMA(1,1,1)(1,0,1)', na.rm=TRUE, linetype = "dashed") +
+  autolayer(fitted(forecast_arima8_store46673), series = 'ARIMA(2,0,0)(2,0,1)', na.rm=TRUE, linetype = 'dashed') +
+  autolayer(fitted(forecast_arima12_store46673), series = 'ARIMA(1,0,1)(1,0,2)', na.rm=TRUE, linetype = "dashed") +
+  scale_color_manual(values = c('#7fc97f' ,'#beaed4', '#fdc086')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Creating, Forecasting and Visualizing ARIMA(p,d,q)(P,0,Q) on Training Set
+Following the same Training-Test Set approach introduced in the computations of the Exponential Smoothing models, the in-sample and out-of-sample performance of the above ARIMA models need to be compared in order to find the best one that best fits. More specifically, every model is trained on the Training set (first 83 days of time-series, 80% of the entire time series for store number 46673) then predicts the demand for the next 20 days. The evaluation of the predictions is based on the Test set (last 20 days of initial time-series, 20% of the entire time series for store number 46673) and based on those values the forecast errors of each model are computed.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Train best models on training set
+training_arima8_store_46673 <- Arima(training_ts_store_46673, order = c(1, 0, 0), seasonal = list(order = c (2, 0, 1), period = 7))
+training_arima10_store_46673 <- Arima(training_ts_store_46673, order = c(1, 0, 1), seasonal = list(order = c (1, 0, 2), period = 7))
+training_arima12_store_46673 <- Arima(training_ts_store_46673, order = c(1, 1, 1), seasonal = list(order = c (1, 0, 1), period = 7))
+
+## Forecast using the best models
+forecast_arima8_store46673 <- forecast(training_arima8_store_46673, h = 20)
+forecast_arima10_store46673 <- forecast(training_arima10_store_46673, h = 20)
+forecast_arima12_store46673 <- forecast(training_arima12_store_46673, h = 20)
+
+accuracy_final_arima_46673 <- rbind(accuracy(forecast_arima8_store46673, test_ts_store_46673),
+                              accuracy(forecast_arima10_store46673, test_ts_store_46673),
+                              accuracy(forecast_arima12_store46673, test_ts_store_46673))
+
+accuracy_final_arima_46673_k <- data.frame(accuracy_final_arima_46673, row.names = c('Train', 'Test', 'Train_2', 'Test_2', 'Train_3', 'Test_3'))
+
+accuracy_final_arima_46673_k %>%  kable(caption = "Accuracy of ARIMA Model", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("ARIMA(1,1,1)(1,0,1)", 1, 2) %>%
+  pack_rows("ARIMA(2,0,0)(2,0,1)", 3, 4) %>%
+  pack_rows("ARIMA(1,0,1)(1,0,2))", 5, 6)
+```
+
+### Final ARIMA Model
+The best ARIMA model is trained once again on the entire time series of store 46673 in order to provide the most accurate forecast for the 14 day lettuce demand. The model final forecast for the lettuce demand using the ARIMA(1, 0, 0)(2, 0, 1)[7] is modeled below.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Train best model on the entire dataset from store 46673]
+best_arima8_store_46673 <- Arima(ts_store_46673, order = c(1, 0, 0), seasonal = list(order = c (2, 0, 1), period = 7))
+forecast_best_arima_store_46673 <- forecast(best_arima8_store_46673, h = 14)
+
+## Best model table
+forecast_best_arima_store_46673_k <- data.frame(forecast_best_arima_store_46673, 
+                                                row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15',
+                                                              '22/06/15', '23/06/15', '24/06/15', '25/06/15', '26/06/15', '27/06/15',
+                                                              '28/06/15', '29/06/15'))
+forecast_best_arima_store_46673_k %>%  kable(caption = "Final 14 Day ARIMA Forecast", align = 'c') %>%  kable_styling(full_width = F)
+
+## Best model plotted
+autoplot(forecast_best_arima_store_46673, main = 'Final 14 Day ARIMA(1, 0, 0)(2, 0, 1)[7] Forecast', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_best_arima_store_46673), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+```
+
+### Forecast Further Improvements
+The model must be checked by a residual analysis to see for further improvements. Much like the ETS model, there needs to be no correlations between the forecast errors of the model in the time series.
+
+The Ljung-Box test statistic considers the first “h” autocorrelations values together. A significant test (small p-value) indicates the data are probably not white noise. The test is perfomed on lags 1 - 20 and the the null hypothesis is the independence of the time series. The Box.test() results in a test statistic of 17.58 and a p-value of 0.6151. These are large values and the null hypotheisis of indipenditely distributed forecast errors is accepted.
+
+Using ggplots, ggACF() function, lags 1 - 19 are visually displayed.Obsebserving this ACF plot allows us to see that only one lag (lag = 6) is significant and that can be exaplained by randomness as one of the first 20 lags can exceed the bounds by chance only. Therefore it can be concluded that that there is no serial autocorrelation between lags 1-19.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Ljung-Box Test
+Box.test(forecast_best_arima_store_46673$residuals, lag = 20, type = 'Ljung-Box')
+
+## These plots are descriptive but they can be improved to increase interpretability by plotting and optimising each one individually
+## Lets focus on the residuals plot in order to determine if they have constant variance (desired)
+autoplot(forecast_best_arima_store_46673$residuals, main = 'Forecast Errors ARIMA(1, 0, 0)(2, 0, 1)[7])', xlab = 'Time Horizon',
+         ylab = 'ARIMA(1, 0, 0)(2, 0, 1)[7] Residuals', col = 'steelblue') + 
+  scale_x_continuous(breaks = seq(5, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+
+## Next lets look at the ACF plot
+ggAcf(forecast_best_arima_store_46673$residuals, main = 'Autocorrelation Function (ACF) on ARIMA(1, 0, 0)(2, 0, 1)[7] Residuals') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), 
+        axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## Histogram
+h <- hist(forecast_best_arima_store_46673$residuals, breaks = 20, col = '#a1d99b', 
+          main = 'Distribution of Forecast Errors on ARIMA(1, 0, 0)(2, 0, 1)[7]', ylab = 'Residuals')
+xfit<-seq(min(forecast_best_arima_store_46673$residuals),max(forecast_best_arima_store_46673$residuals),length=40)
+yfit<-dnorm(xfit,mean=mean(forecast_best_arima_store_46673$residuals),sd=sd(forecast_best_arima_store_46673$residuals))
+yfit <- yfit*diff(h$mids[1:2])*length(forecast_best_arima_store_46673$residuals)
+lines(xfit, yfit, col="#31a354", lwd=2)
+```
+
+The plotted residuals and the histogram show that the forecast errors have constant variance over time and are normally distributed with mean of zero. It is conclusive that ARIMA(1, 0, 0)(2, 0, 1)[7] provides an adequate preditive model for the lettuce demand of store 46673.
+
+### Final Forecast for Resturant 46673: ETS(M,N,A) vs. ARIMA(1, 0, 0)(2, 0, 1)[7]
+The candidate models have been determined to the ETS(M,N,A) and the ARIMA(1, 0, 0)(2, 0, 1)[7] as these had the best in-sample and out-of-sample scores for their respective model classes.
+
+The models are now compared against eachother below and the model with the lowest RMSE will be determined the best model for lettuce demand forecasting for store 46673.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Checking which model based on RMSE (ETS or ARIMA)
+accuracy_final_model_all_46673 <- rbind(accuracy(forecast_ets_store_46673, test_ts_store_46673),
+                              accuracy(forecast_arima8_store46673, test_ts_store_46673))
+
+accuracy_final_model_all_46673_k <- data.frame(accuracy_final_model_all_46673, row.names = c('Train', 'Test', 'Train_2', 'Test_2'))
+
+accuracy_final_model_all_46673_k %>%  kable(caption = "Accuracy of Best ETS and ARIMA", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("ETS(M,N,A)", 1, 2) %>%
+  pack_rows("ARIMA(1,0,0)(2,0,1)", 3, 4) 
+```
+
+ETS(M,N,A) appears to fit the data better than the ARIMA model and similarly has better forecasting power than the ARIMA model. This is based on the in-sample (Training set) and out-of-sample (Test set) RMSE scores. It is therefore selected as the final forecast model for store number 46673. It is trained on the entire time series in order to enhance its forecasting power, and made to forecast 14 days.
+
+The final forecast of lettuce demand for store number 46673 from 06/16/2015 to 06/29/2015 is saved on a csv file.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Final model for store 46673
+final_store_46673 <- forecast(ets_store_46673, h = 14)
+autoplot(final_store_46673, main = 'Final 14 Day ETS (M,N,A) Forecast', ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon', xlab = 'Time Horizon') + 
+  autolayer(fitted(final_store_46673), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+
+## Forecast results to csv
+write.csv(final_store_46673, 'store_46673_forecast.csv')
+
+## Final Forecast (Table)
+final_store_46673_k <- data.frame(final_store_46673, row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15', '22/06/15', '23/06/15', '24/06/15', '25/06/15', '26/06/15', '27/06/15', '28/06/15', '29/06/15'))
+final_store_46673_k %>%  kable(caption = "Final 14 Day ETS Forecast", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+## Resturant 20974: New York, New York
+The dataframe created for StoreNumber 20974 has two columns, a date column and a lettuce quantity column. This type of dataframe can be converted into a time series object in R using the ts() function. A timeseries is a series of data points ordered in time. In a time series, time is often the independent variable and the goal is usually to make a forecast for the future, exactly what we are trying to do here. The ts() function converts a numeric vector into a R time series object.
+
+The time-series object of restaurant 20974 is created with a weekly frequency (frequency = 7) and starting and ending day “20-03-2015” and “15-06-2015” respectively. The initial days, “06,10,13,16,17,18-03-2015” were deleted from the time series since sequential missing data occurred or there were some odd trends in the data. The reason of omitting the missing data at the very beginning of the time series is the biased estimation that its presence will cause. By deleteing this data we improve the forecast power available to us.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Remove first 6 days in store dataframe as quanitites look wrong/erreanous 
+store_20974_cleaned <- store_20974[-c(1:6),]
+
+## Store 20974
+ts_store_20974 <- ts(store_20974_cleaned[, 2], frequency = 7, start (03, 05))
+autoplot(ts_store_20974,  main="Lettuce Demand in Store 20974 ", xlab="Time Horizon", ylab="Lettuce Quantity (ounces)", 
+         col = "darkblue", frame.plot = FALSE)  + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### STL Decomposition and Visualisation
+The bar on the seasonal pattern is larger than the grey bar on the data panel. This indicates that the seasonal signal is large relative to the variation in the data. The trend panel is the largest box compared to the data and seasonal boxes, this indicates that the variation attributed to the trend is much smaller than the seasonal components and is consequently only a small part of the variation in the data series. The variation attributed to the trend is considerably smaller than the stochastic component (the remainders). As such, we can deduce that these data do not exhibit a trend.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Seasonal Decompsotion of Time Series 
+plot(stl(ts_store_20974, s.window = "period"), main="Seasonal Decomposition of Time Series Lettuce Demand of Store 20974", xaxt = 'n')
+
+ggsubseriesplot(ts_store_20974, main = 'Time Series Sub-Series Plot', ylab = 'Lettuce Quantity (in Ounces)', 
+                xlab = 'Time Horizon') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"))
+
+ggAcf(ts_store_20974, main = 'Autocorrelation Function (ACF) on Time Series') +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Initial Holt-Winters and ETS Functions
+Initially, a “ZZZ” model is created in order to have R automatically fit the Error, Trend and Seasonality values of the time series. This initial model will return letters which will be used throughout the remaineder of the sotre numbher 20974 forecast process.
+
+The Holt-Winters model, the fitted ETS model and the actual time series are plotted for visual interpretability.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## HoltWinters - ETS 
+HW_store_20974 <- HoltWinters(ts_store_20974, beta = FALSE)
+
+ets_store_20974 <- ets(ts_store_20974, model = 'ZZZ')
+ets_store_20974 ## Automatic model concludes a A,N,A model is best for this data
+
+plot(HW_store_20974, main="Holt-Winters - ETS (A,N,A) in-sample performance", xlab="Time Horizon", 
+     ylab="Estimated (fitted) values of lettuce demand (ounces)", lty = 1, col = "black", frame.plot = FALSE)           
+lines(fitted(ets_store_20974), col = "blue", lty = 2)
+legend("bottom", legend=c("Actual","HW", "ETS"), col=c("black", "red", "blue"), box.lty=0, lty=c(1,1,2), cex=0.8) 
+```
+
+### Training and Test Set
+The test set needs to be the most recent part of the data as the idea is to simulate a production environment, where after the model is trained it would be evaluated on data it had not seen. Throughout this forecasting project an 80:20 split is used. That is, 80% of the time series data will be attributed to the training set and the most recent 20% will be used for the test set.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Training and Test sets (70 days, 80%)
+training_ts_store_20974 <- ts(store_20974_cleaned[1:(nrow(store_20974_cleaned) * 0.8), 2], frequency = 7)
+length(training_ts_store_20974)
+
+## Test set (18 day, 20%)
+test_ts_store_20974 <- store_20974_cleaned[((nrow(store_20974_cleaned) * 0.8)) : nrow(store_20974_cleaned)+1, 2]
+length(test_ts_store_20974)
+
+length(test_ts_store_20974) + length(training_ts_store_20974)
+length(test_ts_store_20974) + length(training_ts_store_20974)
+```
+
+### Creating, Forecasting and Visualizing Holt-Winters on Training Set
+The initial Holt-Winters model will now be trained on in-sample data and it will forecast 18 days past the last day of the training data. This is done using the forecast()function which takes the model and a argument, h, the number of periods it should forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Creating Holt-Winters filtering of the training time series for store 20974. Beta is set to false to force exponential smoothing 
+training_HW_store_20974 <- HoltWinters(training_ts_store_20974, beta = FALSE)
+forecast_HW1_store_20974 <- forecast(training_HW_store_20974, h = 18)
+
+autoplot(forecast_HW1_store_20974, main = 'Training Set Holt-Winters Forecast 20974', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_HW1_store_20974), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 16, by = 2)) +
+  scale_y_continuous(breaks = c(150, 200, 250, 300, 350, 400, 450))  + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Creating, Forecasting and Visualizing ETS(ANA) on Training Set
+The initial ETS model with a model paramet = ‘ANA’, a model with an additive level and seasonal component, will now be trained on in-sample data and it will forecast 18 days past the last day of the training data. This is done using the forecast()function which takes the model and a argument, h, the number of periods it should forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## ## ETS models use maximum likelihood, the probability of the data arising from the specified model. ETS automatically chooses the best type of model. Convenient for forecasting timeseries that have trends or seasonality. Lets explore...
+training_ets_store_20974 <- ets(training_ts_store_20974, model = 'ANA')
+forecast_ets_store_20974 <- forecast(training_ets_store_20974, h = 18)
+
+autoplot(forecast_ets_store_20974, main = 'Training Set ETS(A,N,A) Forecast 20974', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_ets_store_20974), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 16, by = 2)) +
+  scale_y_continuous(breaks = c(150, 200, 250, 300, 350, 400, 450)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Out-Of-Sample Model Comparison
+The performance metric used for evaluation is the RMSE. By looking at the results of each accuracy test, it can be concluded that the ETS(ANA) model (RMSE = 47.205) is superior to the Holt-Winters model (RMSE = 48.280) as it has a lower RMSE on the out-of-sample data. The ETS model not only fits the data better, but it also seems to predict it better. Because the ETS model has both a better in-sample and out-of-sample RMSE score and preformance it is selected as the better model and will be tested again later, during the ARIMA forecast process.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Accuracy Comparison of ETS and Holt-Winter
+accuracy_ets_HW_20974 <- rbind(accuracy(forecast_HW1_store_20974, test_ts_store_20974),
+                              accuracy(forecast_ets_store_20974, test_ts_store_20974))
+
+accuracy_ets_HW_20974_k <- data.frame(accuracy_ets_HW_20974, row.names = c('Train', 'Test', 'Train_2', 'Test_2'))
+
+accuracy_ets_HW_20974_k %>%  kable(caption = "Accuracy of Best ETS and HW", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("Holt-Winters", 1, 2) %>%
+  pack_rows("ETS(A,N,A)", 3, 4) 
+```
+
+### Final ETS Model
+The final ETS(ANA) model is trained on the entire time series relating to store number 20974. This is done in order to give the most accurate 14 day lettuce demand forecast for the store. Again, the forecast() function is used, this time with an “h” argument of 14.
+
+The ETS model and the forecast is presented visually below.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## The ETS model is supieror to the Holt-Winter model because ME, RMSE, MAE, MAPE, and MASE are all lower when comparing the models. The ETS model will be trained on all the data and finally used to forecast the 14 day period (06/16/2015 to 06/29/2015)
+final_ets_store_20974 <- forecast(ets_store_20974, h = 14)
+
+final_ets_store_20974_k <- data.frame(final_ets_store_20974, 
+                                      row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15',
+                                                    '21/06/15', '22/06/15', '23/06/15', '24/06/15', '25/06/15',
+                                                    '26/06/15', '27/06/15', '28/06/15', '29/06/15'))
+final_ets_store_20974_k %>%  kable(caption = "Final 14 Day ETS Forecast", align = 'c') %>%  kable_styling(full_width = F)
+
+autoplot(final_ets_store_20974, main = 'Final 14 Day ETS (A,N,A) Forecast 20974', ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(final_ets_store_20974), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+```
+
+### Forecast Further Improvements
+The Ljung-Box test statistic considers the first “h” autocorrelations values together. A significant test (small p-value) indicates the data are probably not white noise. It is a way to test for the absence of serial autocorrelation and we desire a small p-value in order to conclude our model is sufficiently forecasted. The test is perfomed on lags 1 - 20 and the the null hypothesis is the independence of the time series. The Box.test() results in a test statistic of 12.1 and a p-value of 0.9126. These are large values and the null hypotheisis of indipenditely distributed forecast errors is accepted.
+
+From the ACF plot, someone can conclude that there is no serial autocorrelation between at lages 1-20, since all lags are between the significant bounds.
+
+In addition, the forecast errors are tested on whether they are normally distributed with a zero mean and a constant variable. The forecast errors’ constant variance is tested by a time plot of the in-sample forecast errors, whereas their normal distribution with zero mean by a histogram plot of the forecast errors, with an overlaid normal curve that has mean zero and the same standard deviation as the distribution of forecast errors.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Ljung-Box Test
+Box.test(final_ets_store_20974$residuals, lag = 20, type = 'Ljung-Box')
+
+## These plots are descriptive but they can be improved to increase interpretability by plotting and optimising each one individually
+## Lets focus on the residuals plot in order to determine if they have constant variance (desired)
+autoplot(final_ets_store_20974$residuals, main = 'Forecast Errors ETS (A,N,A)', ylab = 'ETS (A,N,A) Residuals', col = 'steelblue') + 
+  scale_x_continuous(breaks = seq(5, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+## Next lets look at the ACF plot
+ggAcf(final_ets_store_20974$residuals, main = 'Autocorrelation Function (ACF) on ETS (A,N,A) Residuals') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 22, by = 2))
+
+## Histogram of residuals
+h <- hist(final_ets_store_20974$residuals, breaks = 20, col = '#a1d99b', 
+          main = 'Distribution of Forecast Errors on ETS(ANA)', xlab = 'Residuals')
+xfit<-seq(min(final_ets_store_20974$residuals),max(final_ets_store_20974$residuals),length=40)
+yfit<-dnorm(xfit,mean=mean(final_ets_store_20974$residuals),sd=sd(final_ets_store_20974$residuals))
+yfit <- yfit*diff(h$mids[1:2])*length(final_ets_store_20974$residuals)
+lines(xfit, yfit, col="#31a354", lwd=2)
+```
+The four tests above help conclude that the ETS(ANA) model is an suficient predictive model with no possible further improvments when trying to predict the lettuce demand for store number 46673.
+
+### ARIMA Forecast Models
+The next step in the project is to develop and ARIMA model that is able to forecast lettuce demand. The ARIMA model will then be compared with the final ETS model above to determine what the truest and most accurate forecast model is.
+
+The outlined tests are completed below in order to determine any trends that might or might not have to be taken into account in the ARIMA model.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## ARIMA Model store 20974
+## Arima Model
+## Testing if timeseries of store is stationary
+adf.test(ts_store_20974) ## Augmented Dickey–Fuller (ADF) t-statistic test to find if the series has a unit root (a series with a trend line will have a unit root and result in a large p-value)
+kpss.test(ts_store_20974, null = 'Trend') ## Kwiatkowski-Phillips-Schmidt-Shin (KPSS) tests he null hypothesis of trend stationarity (a low p-value will indicate a signal that is not trend stationary, has a unit root) 
+ndiffs(ts_store_20974)
+nsdiffs(ts_store_20974)
+pp.test(ts_store_20974)
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Next lets look at the ACF plot for the differences
+ggAcf(ts_store_20974, main = 'Autocorrelation Function (ACF) of Seasonal Differenced Time-Series') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## The partial autocorrelation function gives the partial correlation of a stationary time series with its own lagged values, regressed the values of the time series at all shorter lags. It contrasts with the autocorrelation function, which does not control for other lags.
+ggPacf(ts_store_20974, main = 'Partial Autocorrelation Function (PACF) of Seasonal Differenced Time-Series') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## Initial auto.arima model that finds 'best model' 
+auto.arima(ts_store_20974, trace = TRUE, ic = 'bic') ## Best model is determined to be: Best model: ARIMA(0,0,0)(1,0,0)[7] log likelihood=-468.43
+## AIC=942.87   AICc=943.15   BIC=950.3
+```
+
+### Manual ARIMA Functions
+The next step is to utilise the information the differentiated ACF and PACF plots have provided along with the best models the auto.arima() function has provided in order to create multiple ARIMA models that will be used to forecast the lettuce demand and compared with each other using the accuracy() function.
+
+All the tests above, along with the best model of the auto.arima() should be a possible form or variation of ARIMA(p,0,q)(P,0,Q). The section below tests variations of the possible base form.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Testing various Arima models using lambda = 0 to estimate log data
+arima1_store_20974 <- Arima(ts_store_20974, order = c(1, 0, 0))
+arima2_store_20974 <- Arima(ts_store_20974, order = c(1, 0, 0), seasonal = list(order = c (1, 0, 0), period = 7))
+arima3_store_20974 <- Arima(ts_store_20974, order = c(0, 0, 1), seasonal = list(order = c (0, 0, 1), period = 7))
+arima4_store_20974 <- Arima(ts_store_20974, order = c(1, 0, 0))
+arima5_store_20974 <- Arima(ts_store_20974, order = c(1, 0, 0), seasonal = list(order = c (2, 0, 0), period = 7))
+arima6_store_20974 <- Arima(ts_store_20974, order = c(0, 0, 0), seasonal = list(order = c (2, 0, 0), period = 7))
+arima7_store_20974 <- Arima(ts_store_20974, order = c(0, 0, 0), seasonal = list(order = c (1, 0, 0), period = 7))
+arima8_store_20974 <- Arima(ts_store_20974, order = c(0, 0, 1), seasonal = list(order = c (1, 0, 0), period = 7))
+arima9_store_20974 <- Arima(ts_store_20974, order = c(0, 0, 0), seasonal = list(order = c (1, 0, 1), period = 7))
+arima10_store_20974 <- Arima(ts_store_20974, order = c(0, 0, 0), seasonal = list(order = c (2, 0, 0), period = 7))
+arima11_store_20974 <- Arima(ts_store_20974, order = c(0, 0, 0), seasonal = list(order = c (3, 0, 0), period = 7))
+arima12_store_20974 <- Arima(ts_store_20974, order = c(0, 0, 0), seasonal = list(order = c (2, 0, 1), period = 7))
+```
+
+The forecast function is used on each ARIMA model and used with a 14 number period forecast.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Forecast
+forecast_arima1_store20974 <- forecast(arima1_store_20974, h = 14)
+forecast_arima2_store20974 <- forecast(arima2_store_20974, h = 14)
+forecast_arima3_store20974 <- forecast(arima3_store_20974, h = 14)
+forecast_arima4_store20974 <- forecast(arima4_store_20974, h = 14)
+forecast_arima5_store20974 <- forecast(arima5_store_20974, h = 14)
+forecast_arima6_store20974 <- forecast(arima6_store_20974, h = 14)
+forecast_arima7_store20974 <- forecast(arima7_store_20974, h = 14)
+forecast_arima8_store20974 <- forecast(arima8_store_20974, h = 14)
+forecast_arima9_store20974 <- forecast(arima9_store_20974, h = 14)
+forecast_arima10_store20974 <- forecast(arima10_store_20974, h = 14)
+forecast_arima11_store20974 <- forecast(arima11_store_20974, h = 14)
+forecast_arima12_store20974 <- forecast(arima12_store_20974, h = 14)
+```
+
+### In-Sample Comparison
+The performance metric used for evaluation is the RMSE. By looking at the results of each one, the lowest RMSE is from ARIMA5 (47.95), while ARIMA8 and ARIMA11 are next two best with RMSE scores of 48.58 and 48.66 respectively. The best three ARIMA models will be improved and visually displayed.
+
+``` {r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Accuracy stores Training Sets
+accuracy_arima_20974 <- rbind(accuracy(forecast_arima1_store20974), accuracy(forecast_arima2_store20974), accuracy(forecast_arima3_store20974),
+           accuracy(forecast_arima4_store20974), accuracy(forecast_arima5_store20974), accuracy(forecast_arima6_store20974),
+           accuracy(forecast_arima7_store20974), accuracy(forecast_arima8_store20974), accuracy(forecast_arima9_store20974),
+           accuracy(forecast_arima10_store20974), accuracy(forecast_arima11_store20974), accuracy(forecast_arima12_store20974))
+
+accuracy_arima_20974_k <- data.frame(accuracy_arima_20974, 
+                                     row.names = c('ARIMA(1,0,0)', 'ARIMA(1,0,0)(1,0,0)', 'ARIMA(0,0,1)(0,0,1)',
+                                                   'ARIMA(2,0,0)', 'ARIMA(1,0,0)(2,0,0)', 'ARIMA(0,0,1)(2,0,0)',
+                                                   'ARIMA(0,0,0)(1,0,0)', 'ARIMA(0,0,1)(1,0,0)', 'ARIMA(0,0,0)(1,0,1)',
+                                                   'ARIMA(0,0,0)(2,0,0)','ARIMA(0,0,0)(3,0,0))','ARIMA(0,0,0)(2,0,1)'))
+
+accuracy_arima_20974_k %>%  kable(caption = "Accuracy of ARIMA1 Model", align = 'c') %>%  kable_styling(full_width = F)
+
+## Plotting the best three models (lowest training set RMSE)
+autoplot(ts_store_20974) +
+  autolayer(fitted(forecast_arima5_store20974), series = 'ARIMA5', na.rm=TRUE, linetype = "dashed") +
+  autolayer(fitted(forecast_arima8_store20974), series = 'ARIMA8', na.rm=TRUE, linetype = 'dashed') +
+  autolayer(fitted(forecast_arima11_store20974), series = 'ARIMA11', na.rm=TRUE, linetype = "dashed") +
+  scale_color_manual(values = c('#7fc97f' ,'#beaed4', '#fdc086')) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"))
+```
+
+### Creating, Forecasting and Visualizing ARIMA(p,0,q)(P,0,Q) on Training Set
+Following the same Training-Test Set approach introduced in the computations of the Exponential Smoothing models, the in-sample and out-of-sample performance of the above ARIMA models need to be compared in order to find the best one that best fits. More specifically, every model is trained on the Training set (first 70 days of time-series, 80% of the entire time series for store number 20974) then predicts the demand for the next 18 days. The evaluation of the predictions is based on the Test set (last 18 days of initial time-series, 20% of the entire time series for store number 20974) and based on those values the forecast errors of each model are computed.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Train best models on training set
+training_arima5_store_20974 <- Arima(training_ts_store_20974, order = c(1, 0, 0), seasonal = list(order = c (2, 0, 0), period = 7))
+training_arima8_store_20974 <- Arima(training_ts_store_20974, order = c(0, 0, 1), seasonal = list(order = c (1, 0, 0), period = 7))
+training_arima11_store_20974 <- Arima(training_ts_store_20974, order = c(0, 0, 0), seasonal = list(order = c (3, 0, 0), period = 7))
+
+## Forecast using the best models
+forecast_arima5_store20974 <- forecast(training_arima5_store_20974, h = 18)
+forecast_arima8_store20974 <- forecast(training_arima8_store_20974, h = 18)
+forecast_arima11_store20974 <- forecast(training_arima11_store_20974, h = 18)
+
+## Test models on out-of sample test set to determine final, best, model
+accuracy_final_arima_20974 <- rbind(accuracy(forecast_arima5_store20974, test_ts_store_20974),
+                              accuracy(forecast_arima8_store20974, test_ts_store_20974),
+                              accuracy(forecast_arima11_store20974, test_ts_store_20974))
+
+accuracy_final_arima_20974_k <- data.frame(accuracy_final_arima_20974, row.names = c('Train', 'Test', 'Train_2', 'Test_2', 'Train_3', 'Test_3'))
+
+accuracy_final_arima_20974_k %>%  kable(caption = "Accuracy of ARIMA Models", align = 'c') %>%  kable_styling(full_width = F) %>%
+  pack_rows("ARIMA(1,0,0)(2,0,0)", 1, 2) %>%
+  pack_rows("ARIMA(0,0,1)(1,0,0)", 3, 4) %>%
+  pack_rows("ARIMA(0,0,0)(3,0,0))", 5, 6)
+```
+
+### Final ARIMA Model
+The best ARIMA model is trained once again on the entire time series of store 20974 in order to provide the most accurate forecast for the 14 day lettuce demand. The model final forecast for the lettuce demand using the ARIMA(1, 0, 0)(2, 0, 0)[7] is modeled below.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Train best model on the entire dataset from store 20974]
+best_arima5_store_20974 <- Arima(ts_store_20974, order = c(1, 0, 0), seasonal = list(order = c (2, 0, 0), period = 7))
+forecast_best_arima_store_20974 <- forecast(best_arima5_store_20974, h = 14)
+
+# Best model table
+forecast_best_arima_store_20974_k <- data.frame(forecast_best_arima_store_20974, 
+                                                row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15',
+                                                              '22/06/15', '23/06/15', '24/06/15', '25/06/15', '26/06/15', '27/06/15',
+                                                              '28/06/15', '29/06/15'))
+forecast_best_arima_store_20974_k %>%  kable(caption = "Final 14 Day ARIMA Forecast", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Best model plotted
+autoplot(forecast_best_arima_store_20974, main = 'Final 14 Day ARIMA(1, 0, 0)(2, 0, 0)[7] Forecast', 
+         ylab = 'Lettuce Quantity (in Ounces)', xlab = 'Time Horizon') + 
+  autolayer(fitted(forecast_best_arima_store_20974), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+```
+
+### Forecast Further Improvements
+The model must be checked by a residual analysis to see for further improvements. Much like the ETS model, there needs to be no correlations between the forecast errors of the model in the time series.
+
+The Ljung-Box test statistic considers the first “h” autocorrelations values together. A significant test (small p-value) indicates the data are probably not white noise. The test is perfomed on lags 1 - 20 and the the null hypothesis is the independence of the time series. The Box.test() results in a test statistic of 18.115 and a p-value of 0.5799. These are large values and the null hypotheisis of indipenditely distributed forecast errors is accepted.
+
+Using ggplots, ggACF() function, lags 1 - 19 are visually displayed. Obsebserving this ACF plot allows us to see that there	is	no	serial	autocorrelation	between	lags 1-19. 
+
+The forecast errors’ constant variance is tested by a time plot of the in-sample forecast errors, whereas their normal distribution with zero mean by a histogram plot of the forecast errors, with an overlaid normal curve that has mean zero and the same standard deviation as the distribution of forecast errors.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Ljung-Box Test
+Box.test(forecast_best_arima_store_20974$residuals, lag = 20, type = 'Ljung-Box')
+
+## These plots are descriptive but they can be improved to increase interpretability by plotting and optimising each one individually
+## Lets focus on the residuals plot in order to determine if they have constant variance (desired)
+autoplot(forecast_best_arima_store_20974$residuals, main = 'Forecast Errors ARIMA(1, 0, 0)(2, 0, 0)[7])', 
+         ylab = 'ARIMA(0, 0, 0)(1, 0, 1)[7] Residuals', col = 'steelblue') + 
+  scale_x_continuous(breaks = seq(5, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+## Next lets look at the ACF plot
+ggAcf(forecast_best_arima_store_20974$residuals, 
+      main = 'Autocorrelation Function (ACF) on ARIMA(1, 0, 0)(2, 0, 0)[7] Residuals') + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  scale_x_continuous(breaks = seq(1, 100, by = 2))
+
+## Histogram
+h <- hist(forecast_best_arima_store_20974$residuals, breaks = 20, col = '#a1d99b', 
+          main = 'Distribution of Forecast Errors on ARIMA(1, 0, 0)(2, 0, 0)[7]', xlab = 'Residuals')
+xfit<-seq(min(forecast_best_arima_store_20974$residuals),max(forecast_best_arima_store_20974$residuals),length=40)
+yfit<-dnorm(xfit,mean=mean(forecast_best_arima_store_20974$residuals),sd=sd(forecast_best_arima_store_20974$residuals))
+yfit <- yfit*diff(h$mids[1:2])*length(forecast_best_arima_store_20974$residuals)
+lines(xfit, yfit, col="#31a354", lwd=2)
+```
+
+The plotted residuals and the histogram show that the forecast errors have constant variance over time and are normally distributed with mean of zero. It is conclusive that ARIMA(1, 0, 0)(2, 0, 0)[7] provides an adequate preditive model for the lettuce demand of store 20974.
+
+### Final Forecast for Resturant 20974: ETS(A,N,A) vs. ARIMA(1, 0, 0)(2, 0, 0)[7])
+The candidate models have been determined to the ETS(A,N,A) and the ARIMA(1, 0, 0)(2, 0, 0)[7] as these had the best in-sample and out-of-sample scores for their respective model classes.
+
+The models are now compared against eachother below and the model with the lowest RMSE will be determined the best model for lettuce demand forecasting for store 20974.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Checking which model based on RMSE (ETS or ARIMA)
+accuracy_final_model_all_20974 <- rbind(accuracy(forecast_ets_store_20974, test_ts_store_20974),
+                              accuracy(forecast_arima5_store20974, test_ts_store_20974))
+
+accuracy_final_model_all_20974_k <- data.frame(accuracy_final_model_all_20974, 
+                                               row.names = c('Train', 'Test', 'Train_2', 'Test_2'))
+
+accuracy_final_model_all_20974_k %>%  kable(caption = "Accuracy of Best ETS and ARIMA", align = 'c') %>%  
+  kable_styling(full_width = F) %>%
+  pack_rows("ETS(A,N,A)", 1, 2) %>%
+  pack_rows("ARIMA(1,0,0)(2,0,0)", 3, 4) 
+```
+
+ETS(A,N,A) appears to fit the data better than the ARIMA model and similarly has better forecasting power than the ARIMA model. This is based on the in-sample (Training set) and out-of-sample (Test set) RMSE scores. It is therefore selected as the final forecast model for store number 20794. It is trained on the entire time series in order to enhance its forecasting power, and made to forecast 14 days.
+
+The final forecast of lettuce demand for store number 20794 from 06/16/2015 to 06/29/2015 is saved on a csv file.
+
+```{r,warning=FALSE,message=FALSE,error=FALSE, fig.align='center',out.extra='angle=90'}
+## Final model for store 20974
+final_store_20974 <- forecast(ets_store_20974, h = 14)
+autoplot(final_store_20974, main = 'Final 14 Day ETS(ANA) Forecast', ylab = 'Lettuce Quantity (in Ounces)', 
+         xlab = 'Time Horizon') + 
+  autolayer(fitted(final_store_20974), series = 'Fitted', na.rm=TRUE) +
+  scale_x_continuous(breaks = seq(0, 22, by = 2)) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  scale_y_continuous(breaks = c(100, 150, 200, 250, 300, 350, 400, 450, 500, 550))
+
+## Forecast results to csv
+write.csv(final_store_20974, 'store_20974_forecast.csv')
+
+## Final Forecast (Table)
+final_store_20974_k <- data.frame(final_store_20974, 
+                                  row.names = c('16/06/15', '17/06/15', '18/06/15', '19/06/15', '20/06/15', '21/06/15', '22/06/15',
+                                                '23/06/15', '24/06/15', '25/06/15', '26/06/15', '27/06/15', '28/06/15', '29/06/15'))
+final_store_20974_k %>%  kable(caption = "Final 14 Day ETS (ANA) Forecast", align = 'c') %>%  kable_styling(full_width = F)
+```
+
+## Conclusion
+This paper has looked at historic lettuce demand for four resturants in the United States. It has used the historic data to individually find the best model, out of a array of Holt-Winters, ETS, and ARIMA forecasts, in order to help store managers prepare for future needs. It is clear to the author that each individual forecast needs to be examined as its own problem and historic data clearly impacts what model is best to use when trying to predict future demand. 
